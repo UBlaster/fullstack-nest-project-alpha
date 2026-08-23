@@ -1,0 +1,49 @@
+{
+  "name": "Workspace Docs",
+  "dockerComposeFile": ["../docker-compose.yml"],
+  "service": "workspace",
+  "runServices": ["postgres", "db-init", "backend", "frontend", "workspace"],
+  "workspaceFolder": "/workspace",
+  "shutdownAction": "none",
+  "overrideCommand": false,
+  "forwardPorts": [5173, 3000],
+  "portsAttributes": {
+    "3000": {
+      "label": "Backend",
+      "onAutoForward": "notify"
+    },
+    "5173": {
+      "label": "Frontend",
+      "onAutoForward": "notify"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode"
+      ],
+      "settings": {
+        "typescript.tsdk": "/workspace/frontend/node_modules/typescript/lib",
+        "typescript.enablePromptUseWorkspaceTsdk": true,
+        "editor.tabSize": 2,
+        "editor.insertSpaces": false,
+        "editor.detectIndentation": false,
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "editor.codeActionsOnSave": {
+          "source.fixAll.eslint": "explicit"
+        },
+        "eslint.workingDirectories": [
+          { "pattern": "./frontend" },
+          { "pattern": "./backend" }
+        ],
+        "[prisma]": {
+          "editor.defaultFormatter": "Prisma.prisma",
+          "editor.insertSpaces": true,
+          "editor.tabSize": 2
+        }
+      }
+    }
+  }
+}

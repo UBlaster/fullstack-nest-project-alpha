@@ -1,0 +1,13 @@
+node_modules
+.env
+*.env
+!.env.example
+*.local
+dist
+coverage
+*.tsbuildinfo
+frontend/.env
+backend/.env
+postgres-data
+.DS_Store
+npm-debug.log*
