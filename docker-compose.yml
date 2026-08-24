@@ -34,7 +34,6 @@ services:
       - ./backend/test:/app/test
       - ./backend/tsconfig.json:/app/tsconfig.json
       - ./backend/nest-cli.json:/app/nest-cli.json
-      - backend-node-modules:/app/node_modules
     command: ["sh", "-c", "npx prisma generate && npm run start:dev"]
     depends_on: {db-init: {condition: service_completed_successfully}}
   frontend:
@@ -44,8 +43,10 @@ services:
     environment: {VITE_API_URL: http://localhost:3000}
     ports: ["5173:5173"]
     volumes:
-      - ./frontend:/app
-      - frontend-node-modules:/app/node_modules
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/tsconfig.json:/app/tsconfig.json
+      - ./frontend/vite.config.ts:/app/vite.config.ts
     command: npm run dev -- --host 0.0.0.0
     depends_on: [backend]
   workspace:
@@ -55,8 +56,6 @@ services:
     working_dir: /workspace
     volumes:
       - ./:/workspace
-      - frontend-node-modules:/workspace/frontend/node_modules
-      - backend-node-modules:/workspace/backend/node_modules
     command:
       [
         "sh",
@@ -66,5 +65,3 @@ services:
     depends_on: [backend, frontend]
 volumes:
   postgres-data: {}
-  backend-node-modules: {}
-  frontend-node-modules: {}
