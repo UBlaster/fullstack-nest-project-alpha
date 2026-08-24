@@ -2,7 +2,7 @@ import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
 import { AppModule } from '../src/app.module';
-import { PrismaService } from '../src/prisma.service';
+import { PrismaService } from '../src/prisma/prisma.service';
 import { createAppValidationPipe } from '../src/validation.pipe';
 
 const credentials = { email: 'admin@example.com', password: 'password123' };
