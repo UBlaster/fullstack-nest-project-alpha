@@ -13,6 +13,10 @@ import { JwtStrategy } from './jwt.strategy';
 				signOptions: {
 					expiresIn: configService.getOrThrow<string>('JWT_EXPIRES_IN') || '1d',
 				},
+				verifyOptions: {
+					algorithms: ['HS256'],
+					ignoreExpiration: false,
+				},
 			}),
 			inject: [ConfigService],
 		}),
