@@ -24,8 +24,6 @@
         "esbenp.prettier-vscode"
       ],
       "settings": {
-        "typescript.tsdk": "/workspace/frontend/node_modules/typescript/lib",
-        "typescript.enablePromptUseWorkspaceTsdk": true,
         "editor.tabSize": 2,
         "editor.insertSpaces": false,
         "editor.detectIndentation": false,
