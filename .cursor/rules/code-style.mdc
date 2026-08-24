@@ -8,6 +8,7 @@ alwaysApply: true
 Источник правды: `frontend/.prettierrc.json`, `backend/.prettierrc.json` и соседние `eslint.config.mjs`. После правок код должен проходить Format Document и ESLint Fix All без ручной укладки.
 
 - Табы, не пробелы. Визуальная ширина таба — 2. `semi`, `singleQuote`, `trailingComma: all`, `printWidth: 100`.
+- Окончания строк только LF. `.gitattributes` принудительно отключает CRLF для исходников даже при Windows `core.autocrlf=true`.
 - Ломай строку сразу после `(` / `{` / JSX-тега: Prettier не схлопнет такой перенос и разложит остальные элементы.
 - Много named-imports — по одному в строке.
 - 2+ параметра функции или метода — каждый на своей строке.
