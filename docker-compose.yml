@@ -25,6 +25,8 @@ services:
       JWT_EXPIRES_IN: "1d"
       PORT: "3000"
       CORS_ORIGIN: "http://localhost:5173"
+      TSC_WATCHFILE: "DynamicPriorityPolling"
+      TSC_WATCHDIRECTORY: "DynamicPriorityPolling"
     ports: ["3000:3000"]
     volumes:
       - ./backend/src:/app/src
@@ -33,7 +35,7 @@ services:
       - ./backend/tsconfig.json:/app/tsconfig.json
       - ./backend/nest-cli.json:/app/nest-cli.json
       - backend-node-modules:/app/node_modules
-    command: npm run start:dev
+    command: ["sh", "-c", "npx prisma generate && npm run start:dev"]
     depends_on: {db-init: {condition: service_completed_successfully}}
   frontend:
     build:
