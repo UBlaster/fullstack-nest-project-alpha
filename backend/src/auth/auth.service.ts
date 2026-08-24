@@ -51,15 +51,38 @@ export class AuthService {
 	}
 
 	async create(dto: createUserDto) {
-		if (dto.password !== dto.confirmPassword) {
+		const { confirmPassword, password, ...userData } = dto;
+		if (password !== confirmPassword) {
 			throw new BadRequestException('Passwords do not match');
 		}
 
+		const existingUser = await this.prisma.user.findUnique({
+			where: {
+				email: userData.email,
+			},
+		});
+
+		if (existingUser) {
+			throw new BadRequestException('User already exists');
+		}
 		const user = await this.prisma.user.create({
 			data: {
-				...dto,
-				password: await hash(dto.password, 10),
-			}
+				...userData,
+				password: await hash(password),
+			},
+		});
+
+		return {
+			message: 'User created successfully',
+			user,
+		};
+	}
+
+	async delete(id: string) {
+		return this.prisma.user.delete({
+			where: {
+				id,
+			},
 		});
 	}
 }
