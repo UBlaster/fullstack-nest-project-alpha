@@ -1,6 +1,12 @@
 import { PrismaClient, WorkspaceRole, ProjectStatus, DocumentStatus } from '@prisma/client';
 const p = new PrismaClient();
 async function main() {
+	const existingUsers = await p.user.count();
+	if (existingUsers > 0) {
+		console.log(`Seed skipped: database already contains ${existingUsers} user(s)`);
+		return;
+	}
+
 	const password = 'password123';
 	const users = [];
 	for (const [email, name] of [
