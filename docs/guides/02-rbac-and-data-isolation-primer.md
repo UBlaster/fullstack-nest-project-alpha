@@ -160,7 +160,54 @@ it.each([
 
 Seed удобен для ручной проверки, но e2e-тесты надёжнее, когда их fixtures однозначны и не зависят от порядка записей в базе.
 
-## 8. Частые ошибки
+## 8. Переиспользуемый каркас policy
+
+Для любого tenant-проекта можно отделить загрузку scope от проверки permission:
+
+```ts
+type Role = 'LEAD' | 'EDITOR' | 'READER';
+type Action = 'view' | 'create' | 'update' | 'delete';
+
+const permissions: Record<Action, readonly Role[]> = {
+	view: ['LEAD', 'EDITOR', 'READER'],
+	create: ['LEAD', 'EDITOR'],
+	update: ['LEAD', 'EDITOR'],
+	delete: ['LEAD'],
+};
+
+function assertAllowed(role: Role, action: Action): void {
+	if (!permissions[action].includes(role)) throw new ForbiddenException();
+}
+```
+
+```ts
+async requireNote(userId: string, noteId: string, action: Action) {
+	const note = await prisma.note.findUnique({
+		where: { id: noteId },
+		include: { board: { select: { teamId: true } } },
+	});
+	if (!note) throw new NotFoundException();
+
+	const member = await prisma.teamMember.findUnique({
+		where: { userId_teamId: { userId, teamId: note.board.teamId } },
+	});
+	if (!member) throw new NotFoundException();
+
+	assertAllowed(member.role, action);
+	return note;
+}
+```
+
+Для list не загружайте всё и не фильтруйте JavaScript:
+
+```ts
+return prisma.note.findMany({
+	where: { board: { team: { members: { some: { userId } } } } },
+	select: { id: true, title: true, boardId: true },
+});
+```
+
+## 9. Частые ошибки
 
 - Искать membership через `findFirst({ where: { userId } })` без ID нужного scope.
 - Считать, что фильтра в list достаточно, и забывать get/update/delete по ID.
@@ -171,7 +218,7 @@ Seed удобен для ручной проверки, но e2e-тесты на
 - Тестировать только успешный сценарий ADMIN.
 - Проверять в list-тесте лишь status `200`, не анализируя содержимое.
 
-## 9. Как подойти к незнакомому проекту
+## 10. Как подойти к незнакомому проекту
 
 Перед реализацией полезно пройти короткий маршрут:
 

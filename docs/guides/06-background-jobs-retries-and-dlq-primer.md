@@ -44,6 +44,43 @@ DLQ не мусорка, а очередь для расследования и 
 
 Отмена кооперативная: API ставит flag, worker проверяет его между batches и корректно закрывает незавершённый multipart upload.
 
+## Переиспользуемый каркас
+
+Producer сохраняет domain row и outbox event одной транзакцией:
+
+```ts
+await prisma.$transaction(async (tx) => {
+	const report = await tx.reportJob.create({ data: { status: 'QUEUED', requestedById } });
+	await tx.outboxEvent.create({
+		data: { type: 'REPORT_REQUESTED', aggregateId: report.id, payload: { reportId: report.id } },
+	});
+});
+```
+
+Dispatcher публикует с stable broker job ID и только потом помечает outbox:
+
+```ts
+await queue.add('build-report', event.payload, {
+	jobId: event.aggregateId,
+	attempts: 5,
+	backoff: { type: 'exponential', delay: 5000 },
+});
+await prisma.outboxEvent.update({ where: { id: event.id }, data: { publishedAt: new Date() } });
+```
+
+Consumer обязан распознавать duplicate:
+
+```ts
+const current = await prisma.reportJob.findUniqueOrThrow({ where: { id: reportId } });
+if (current.status === 'COMPLETED') return;
+
+const claim = await prisma.reportJob.updateMany({
+	where: { id: reportId, status: 'QUEUED' },
+	data: { status: 'PROCESSING', heartbeatAt: new Date() },
+});
+if (claim.count === 0) return;
+```
+
 ## Частые ошибки
 
 - помещать большой файл или JWT в message;
@@ -53,4 +90,3 @@ DLQ не мусорка, а очередь для расследования и 
 - считать duplicate delivery исключением;
 - завершать process без graceful shutdown;
 - повторно выдавать download URL, истёкший ещё в очереди.
-

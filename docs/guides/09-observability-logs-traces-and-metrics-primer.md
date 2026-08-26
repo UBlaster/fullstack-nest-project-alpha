@@ -39,6 +39,46 @@ Span создают вокруг meaningful operation: DB query, cache lookup, q
 
 Telemetry экспортируется асинхронно и с лимитами. Падение collector не должно остановить оплату или login. Нужны sampling, batch export и защита от бесконечного buffer.
 
+## Переиспользуемый NestJS-каркас
+
+Middleware принимает или создаёт request ID и возвращает его клиенту:
+
+```ts
+use(request: Request, response: Response, next: NextFunction) {
+	const incoming = request.header('x-request-id');
+	const requestId = isSafeRequestId(incoming) ? incoming! : randomUUID();
+	response.setHeader('x-request-id', requestId);
+	this.context.run({ requestId }, next);
+}
+```
+
+Logger добавляет trace IDs, но redacts secrets:
+
+```ts
+const logger = pino({
+	redact: [
+		'req.headers.authorization',
+		'password',
+		'passwordConfirmation',
+		'presignedUrl',
+		'webhookSignature',
+	],
+});
+```
+
+Trace context передаётся через очередь стандартными W3C headers:
+
+```ts
+const carrier: Record<string, string> = {};
+propagation.inject(context.active(), carrier);
+await queue.add('job', { entityId, traceContext: carrier });
+
+const parent = propagation.extract(context.active(), job.data.traceContext);
+await context.with(parent, () => tracer.startActiveSpan('job.process', processJob));
+```
+
+Metric labels должны быть ограничены: `{ method: 'GET', route: '/notes/:id', status: '2xx' }`. ID пользователя или raw URL оставляйте в trace/log.
+
 ## Частые ошибки
 
 - логировать Authorization header;
@@ -48,4 +88,3 @@ Telemetry экспортируется асинхронно и с лимитам
 - `console.log` рядом со structured logger;
 - считать каждый ожидаемый `404` server error;
 - telemetry backend становится обязательной зависимостью API.
-

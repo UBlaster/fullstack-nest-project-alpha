@@ -50,6 +50,51 @@ Rollback destructive migration часто невозможен без потер
 - остановку/restart backfill;
 - rollback каждого доконтрактного release.
 
+## Переиспользуемый rollout
+
+Expand migration добавляет nullable колонку:
+
+```sql
+ALTER TABLE "Article" ADD COLUMN "body" TEXT;
+```
+
+Новый code в первой версии делает dual-write, но читает legacy:
+
+```ts
+await prisma.article.update({
+	where: { id },
+	data: { content: dto.content, body: dto.content },
+});
+
+return { ...article, content: article.content };
+```
+
+Идемпотентный batch обновляет только незаполненные строки:
+
+```sql
+WITH batch AS (
+  SELECT "id" FROM "Article"
+  WHERE "body" IS NULL
+  ORDER BY "id"
+  LIMIT 500
+)
+UPDATE "Article" a
+SET "body" = a."content"
+FROM batch
+WHERE a."id" = batch."id" AND a."body" IS NULL;
+```
+
+Verification перед switch:
+
+```sql
+SELECT
+  COUNT(*) FILTER (WHERE "body" IS NULL) AS missing,
+  COUNT(*) FILTER (WHERE "body" IS DISTINCT FROM "content") AS mismatch
+FROM "Article";
+```
+
+Switch читает `body ?? content`; только после нулевого fallback один release cycle можно прекратить legacy write. `DROP COLUMN` — последняя отдельная contract migration.
+
 ## Частые ошибки
 
 - править уже применённую migration;
@@ -58,4 +103,3 @@ Rollback destructive migration часто невозможен без потер
 - удалять legacy поле в том же PR;
 - не учитывать replicas/long transactions;
 - считать rollback одной обратной SQL-командой.
-

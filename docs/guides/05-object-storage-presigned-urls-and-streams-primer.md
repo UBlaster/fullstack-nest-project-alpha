@@ -43,6 +43,45 @@ DB cursor/page -> CSV transform -> HTTP response
 
 CDN полезен для публичных immutable assets. Приватный документ нельзя сделать публичным только ради CDN. Для него используют signed CDN URL/cookie или по-прежнему signed S3 download после authorization.
 
+## Переиспользуемый S3-рецепт
+
+```ts
+async createUploadUrl(key: string, mimeType: string): Promise<string> {
+	const command = new PutObjectCommand({
+		Bucket: this.bucket,
+		Key: key,
+		ContentType: mimeType,
+	});
+	return getSignedUrl(this.s3, command, { expiresIn: 600 });
+}
+
+async verifyUpload(key: string, expectedSize: number) {
+	const object = await this.s3.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+	if (object.ContentLength !== expectedSize) throw new UnprocessableEntityException();
+}
+```
+
+Потоковый export можно построить через async generator:
+
+```ts
+async function* readRows(prisma: PrismaClient, teamId: string) {
+	let cursor: string | undefined;
+	while (true) {
+		const rows = await prisma.note.findMany({
+			where: { board: { teamId } },
+			take: 500,
+			...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+			orderBy: { id: 'asc' },
+		});
+		if (rows.length === 0) return;
+		yield* rows;
+		cursor = rows.at(-1)!.id;
+	}
+}
+```
+
+Controller пишет строку, ждёт `drain` при backpressure и прекращает generator при client disconnect.
+
 ## Частые ошибки
 
 - хранить presigned URL в БД как постоянный;
@@ -51,4 +90,3 @@ CDN полезен для публичных immutable assets. Приватны�
 - считать metadata созданного upload готовым файлом;
 - забыть orphan cleanup;
 - назвать streaming endpoint потоковым, но заранее вызвать `findMany` без limit.
-

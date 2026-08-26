@@ -57,6 +57,57 @@ ProjectController -> ProjectService -> PrismaService
 - ошибочный DTO даёт `400` до вызова business operation;
 - seed создаёт такие же hashes, как обычная регистрация.
 
+## Переиспользуемый рецепт NestJS
+
+Спрячьте bcrypt за маленьким service: tests смогут подменить его, а параметры не размазываются по auth-коду.
+
+```ts
+@Injectable()
+export class PasswordService {
+	private readonly rounds = Number(process.env.BCRYPT_ROUNDS ?? 12);
+
+	hash(password: string): Promise<string> {
+		return bcrypt.hash(password, this.rounds);
+	}
+
+	verify(password: string, hash: string): Promise<boolean> {
+		return bcrypt.compare(password, hash);
+	}
+}
+```
+
+Registration явно формирует DB input:
+
+```ts
+async register(dto: RegisterDto) {
+	if (dto.password !== dto.passwordConfirmation) {
+		throw new BadRequestException('Passwords do not match');
+	}
+
+	return this.prisma.user.create({
+		data: {
+			email: dto.email.trim().toLowerCase(),
+			name: dto.name.trim(),
+			password: await this.passwords.hash(dto.password),
+		},
+		select: { id: true, email: true, name: true },
+	});
+}
+```
+
+E2E проверяет не только response, но и сохранённое значение:
+
+```ts
+const response = await request(app.getHttpServer())
+	.post('/auth/register')
+	.send({ email, name: 'Test', password, passwordConfirmation: password })
+	.expect(201);
+
+const stored = await prisma.user.findUniqueOrThrow({ where: { id: response.body.id } });
+expect(stored.password).not.toBe(password);
+expect(await bcrypt.compare(password, stored.password)).toBe(true);
+```
+
 ## Частые ошибки
 
 - hash уже захешированного пароля при каждом seed;
@@ -65,4 +116,3 @@ ProjectController -> ProjectService -> PrismaService
 - сохранение confirmation;
 - выбор tenant через первый membership;
 - использование compile-time interface вместо runtime validation.
-

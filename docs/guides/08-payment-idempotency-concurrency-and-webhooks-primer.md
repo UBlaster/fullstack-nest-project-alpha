@@ -39,6 +39,45 @@ External operation уже успешна, но backend упал до локал�
 
 Номера карт, CVV, provider secret, webhook signature и raw sensitive payload. Audit хранит IDs, переходы, result/error code и correlation ID.
 
+## Переиспользуемый каркас
+
+State machine держите в одном месте:
+
+```ts
+const allowed: Record<PaymentStatus, readonly PaymentStatus[]> = {
+	CREATED: ['PENDING', 'FAILED', 'CANCELLED'],
+	PENDING: ['SUCCEEDED', 'FAILED', 'CANCELLED'],
+	SUCCEEDED: [],
+	FAILED: [],
+	CANCELLED: [],
+};
+
+function assertTransition(from: PaymentStatus, to: PaymentStatus) {
+	if (!allowed[from].includes(to)) throw new ConflictException('Invalid payment transition');
+}
+```
+
+Optimistic update защищает concurrent webhook/reconciliation:
+
+```ts
+const updated = await prisma.payment.updateMany({
+	where: { id, version: expectedVersion, status: expectedStatus },
+	data: { status: nextStatus, version: { increment: 1 } },
+});
+if (updated.count === 0) throw new ConcurrentPaymentUpdateError();
+```
+
+Event deduplication начинается с unique insert внутри transaction:
+
+```ts
+await prisma.$transaction(async (tx) => {
+	await tx.paymentEvent.create({ data: { providerEventId: event.id, type: event.type } });
+	await transitions.apply(tx, event);
+});
+```
+
+Если insert получил unique conflict, webhook уже обработан: верните `200`, не повторяя side effects. Timeout provider означает «результат неизвестен», а не автоматический `FAILED`; такую запись подбирает reconciliation.
+
 ## Частые ошибки
 
 - idempotency только в памяти процесса;
@@ -48,4 +87,3 @@ External operation уже успешна, но backend упал до локал�
 - terminal status можно откатить;
 - timeout автоматически означает payment failed;
 - тестировать повторы последовательно, но не параллельно.
-

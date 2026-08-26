@@ -42,6 +42,47 @@ N+1 ищут по SQL-логам и числу запросов на один HT
 
 Значения передают параметрами. Конкатенация `WHERE title LIKE '%${q}%'` создаёт SQL injection. Идентификаторы таблиц нельзя принимать от клиента вообще.
 
+## Практический рецепт
+
+Сначала измерьте число queries одного сценария. В Prisma можно временно слушать события:
+
+```ts
+const prisma = new PrismaClient({ log: [{ emit: 'event', level: 'query' }] });
+let queryCount = 0;
+prisma.$on('query', () => queryCount++);
+```
+
+Search DTO приводит query string к числам и ограничивает стоимость:
+
+```ts
+export class SearchQueryDto {
+	@IsString()
+	@Length(2, 100)
+	q!: string;
+
+	@Type(() => Number)
+	@IsInt()
+	@Min(1)
+	@Max(50)
+	limit = 20;
+}
+```
+
+Raw SQL передаёт значения параметрами и фильтрует tenant до limit:
+
+```ts
+await prisma.$queryRaw<Row[]>`
+	SELECT d."id", d."title", similarity(d."title", ${q}) AS score
+	FROM "Document" d
+	JOIN "Project" p ON p."id" = d."projectId"
+	WHERE p."workspaceId" = ${workspaceId} AND d."title" % ${q}
+	ORDER BY score DESC, d."id" ASC
+	LIMIT ${limit}
+`;
+```
+
+В отчёте храните SQL, объём данных, actual time/rows/buffers до и после. Без одинаковых условий сравнение бессмысленно.
+
 ## Частые ошибки
 
 - «лечить» N+1 кешем;
@@ -50,4 +91,3 @@ N+1 ищут по SQL-логам и числу запросов на один HT
 - нестабильная pagination без tie-break;
 - тест ranking только на одном совпадении;
 - забыть tenant filter в raw query.
-

@@ -45,6 +45,46 @@ RRF score = sum(1 / (k + rank_in_list))
 
 429 требует уважать Retry-After/backoff. Batch получает stable IDs; частичный успех сохраняется, чтобы не оплачивать всё повторно. Cost metrics считают tokens/chunks без логирования текста.
 
+## Переиспользуемые алгоритмы
+
+Простой chunker с overlap показывает идею; production token count должен использовать tokenizer выбранной модели:
+
+```ts
+function chunk<T>(tokens: T[], size = 800, overlap = 100): T[][] {
+	if (overlap >= size) throw new Error('overlap must be smaller than size');
+	const result: T[][] = [];
+	for (let start = 0; start < tokens.length; start += size - overlap) {
+		result.push(tokens.slice(start, start + size));
+		if (start + size >= tokens.length) break;
+	}
+	return result;
+}
+```
+
+RRF объединяет lexical и semantic ranks, не сравнивая их raw scores:
+
+```ts
+function reciprocalRankFusion(lists: SearchHit[][], k = 60): SearchHit[] {
+	const scores = new Map<string, number>();
+	const hits = new Map<string, SearchHit>();
+
+	for (const list of lists) {
+		list.forEach((hit, index) => {
+			hits.set(hit.documentId, hit);
+			scores.set(hit.documentId, (scores.get(hit.documentId) ?? 0) + 1 / (k + index + 1));
+		});
+	}
+
+	return [...hits.values()].sort(
+		(a, b) => scores.get(b.documentId)! - scores.get(a.documentId)!,
+	);
+}
+```
+
+Stage processing начинается с unique claim `(versionId, stage, inputHash)`. Текст и vectors загружаются по ID, не передаются в broker payload. Vector query обязательно содержит tenant predicate до `ORDER BY vector <=> query LIMIT n`.
+
+При смене модели храните рядом `model`, `dimension`, `embeddingVersion` и coverage. Config switch меняет read version только после backfill/quality check; предыдущая version остаётся для rollback.
+
 ## Частые ошибки
 
 - current version переключается до окончания index;
@@ -54,4 +94,3 @@ RRF score = sum(1 / (k + rank_in_list))
 - semantic candidates фильтруются в JavaScript;
 - chunks/document content попадают в logs;
 - качество оценивается только субъективным одним запросом.
-

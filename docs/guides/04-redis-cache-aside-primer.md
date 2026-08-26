@@ -45,6 +45,49 @@ Jitter немного разносит expiry разных keys, чтобы он
 
 Проверяют не только одинаковый JSON, но и число DB calls, разделение tenants, инвалидирование, битый value, остановленный Redis и параллельный miss.
 
+## Переиспользуемый сервис
+
+```ts
+async getOrLoad<T>(key: string, ttl: number, load: () => Promise<T>): Promise<T> {
+	try {
+		const raw = await this.redis.get(key);
+		if (raw !== null) return JSON.parse(raw) as T;
+	} catch (error) {
+		this.logger.warn({ error }, 'Cache read failed');
+	}
+
+	const value = await load();
+	try {
+		await this.redis.set(key, JSON.stringify(value), 'EX', ttl);
+	} catch (error) {
+		this.logger.warn({ error }, 'Cache write failed');
+	}
+	return value;
+}
+```
+
+Версионный namespace упрощает invalidation:
+
+```ts
+const versionKey = `cache:team:${teamId}:version`;
+const version = (await redis.get(versionKey)) ?? '0';
+const listKey = `cache:team:${teamId}:v${version}:boards:${filterHash}`;
+
+// после DB commit
+await redis.incr(versionKey);
+```
+
+Старые keys не читаются и удаляются TTL. Access check всё равно выполняется до `getOrLoad`.
+
+Для stampede lock token должен сниматься atomically:
+
+```lua
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('del', KEYS[1])
+end
+return 0
+```
+
 ## Частые ошибки
 
 - `KEYS *` в request path;
@@ -53,4 +96,3 @@ Jitter немного разносит expiry разных keys, чтобы он
 - ошибка Redis превращается в `500`;
 - бессрочный lock;
 - cache обновился, а DB transaction ещё не committed.
-
