@@ -9,6 +9,39 @@
 
 Работа состоит из четырёх отдельных migrations/releases. Их нельзя объединять или переписывать после применения.
 
+## Как это связано с текущим репозиторием
+
+Сейчас `content` обязательно в `backend/prisma/schema.prisma`, создаётся в `DocumentsService.create`, обновляется в `DocumentsService.update`, выводится в `frontend/src/pages/document/ui/DocumentPage.tsx` и заполняется seed. Значит, dual-read/write нужно провести через все эти места, а не только через Prisma schema.
+
+- **Expand** — добавить новое, не удаляя старое.
+- **Backfill** — заполнить новое поле для уже существующих строк.
+- **Switch** — перевести чтение на новое поле.
+- **Contract** — удалить legacy только после rollback window.
+
+На фазе A Prisma schema временно содержит оба поля:
+
+```prisma
+model Document {
+  // остальные поля
+  content String
+  body    String?
+}
+```
+
+Service пишет оба значения:
+
+```ts
+data: {
+	title: dto.title,
+	content: dto.content,
+	body: dto.content,
+	projectId,
+	authorId: userId,
+}
+```
+
+Backfill удобно реализовать raw SQL batches с условием `body IS NULL`; это делает повторный запуск безопасным. После switch API всё ещё может отдавать поле `content`, вычисляя его из `body`, чтобы не ломать текущий React frontend. Переименование внешнего JSON-контракта не является целью этой DB migration.
+
 ## Release A — expand и dual-write
 
 1. Добавить nullable `Document.body String?` новой migration, не трогая `content`.
@@ -66,6 +99,10 @@
 - create/update во время backfill не создаёт mismatch;
 - migrations применяются на чистой БД и копии с данными.
 
+## Порядок выполнения
+
+Выполняйте по одному release и фиксируйте результат: A expand/dual-write -> backfill rehearsal -> B switch reads -> наблюдение -> C stop legacy writes -> rollback window -> D contract. Нельзя заранее создать contract migration и применить её вместе с expand только потому, что локально запускается один container.
+
 ## Runbook
 
 Создать `docs/database/07-zero-downtime-content-migration.md`: команды каждого deploy, SQL verification, dashboards, stop criteria, rollback до contract и действия после contract. Приложить результаты rehearsal.
@@ -76,4 +113,3 @@
 - API остаётся доступным, данные не теряются, backfill идемпотентен.
 - Минимум две соседние версии совместимы на каждом доконтрактном шаге.
 - Contract запускается только после документированных проверок.
-

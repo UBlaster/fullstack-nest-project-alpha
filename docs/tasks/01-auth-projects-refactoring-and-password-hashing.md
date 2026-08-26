@@ -11,6 +11,93 @@
 - При создании проекта workspace выбирается через первый найденный membership.
 - Глобальный `ValidationPipe` уже включён.
 
+## Сначала разберитесь с терминами
+
+- **DTO (Data Transfer Object)** — класс, описывающий допустимое тело HTTP-запроса. В отличие от TypeScript interface, DTO существует во время работы приложения, поэтому `class-validator` может вернуть `400` до входа в service.
+- **Hash пароля** — необратимый результат медленной функции. Мы не расшифровываем его, а вызываем `bcrypt.compare(candidate, storedHash)`.
+- **Dependency Injection (DI)** — Nest сам создаёт service и передаёт его в constructor. Поэтому в коде не должно быть `new AuthService(...)`.
+- **E2E-тест** — тест, который поднимает настоящий Nest application и вызывает endpoint через HTTP (`supertest`).
+
+Эти определения используются в следующих задачах без повторного объяснения.
+
+## Какие файлы должны получиться
+
+```text
+backend/src/auth/auth.module.ts
+backend/src/auth/auth.controller.ts
+backend/src/auth/auth.service.ts
+backend/src/auth/jwt.strategy.ts
+backend/src/auth/dto/login.dto.ts
+backend/src/auth/dto/register.dto.ts
+backend/src/auth/dto/delete-account.dto.ts
+backend/src/projects/projects.module.ts
+backend/src/projects/projects.controller.ts
+backend/src/projects/projects.service.ts
+backend/src/projects/dto/create-project.dto.ts
+backend/src/projects/dto/update-project.dto.ts
+```
+
+Удалите старые определения из `backend/src/auth.ts` и `backend/src/resources.ts` только после подключения новых modules в `backend/src/app.module.ts`. Documents временно могут остаться в `resources.ts` до задачи №2.
+
+## Опорная реализация
+
+DTO проекта должен быть настоящим классом:
+
+```ts
+export class CreateProjectDto {
+	@IsString()
+	@Length(1, 120)
+	name!: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(2000)
+	description?: string;
+}
+```
+
+В `RegisterDto` проверяйте confirmation отдельным validator или явно в service. В Prisma передавайте только разрешённые поля:
+
+```ts
+const passwordHash = await bcrypt.hash(dto.password, this.hashRounds);
+
+const user = await this.prisma.user.create({
+	data: {
+		email: dto.email.toLowerCase(),
+		name: dto.name,
+		password: passwordHash,
+	},
+	select: { id: true, email: true, name: true },
+});
+```
+
+`passwordConfirmation` здесь намеренно отсутствует. Login меняется с текущего `user.password !== dto.password` на:
+
+```ts
+const passwordMatches = user
+	? await bcrypt.compare(dto.password, user.password)
+	: false;
+
+if (!user || !passwordMatches) {
+	throw new UnauthorizedException('Invalid credentials');
+}
+```
+
+Workspace при создании project берётся из URL:
+
+```ts
+@Post('workspaces/:workspaceId/projects')
+create(
+	@Param('workspaceId') workspaceId: string,
+	@Body() dto: CreateProjectDto,
+	@Req() request: AuthenticatedRequest,
+) {
+	return this.projectsService.create(request.user.sub, workspaceId, dto);
+}
+```
+
+В service нельзя оставлять текущий `findFirst({ where: { userId } })`: он выбирает случайный workspace пользователя. Ищите составной ключ `userId_workspaceId`.
+
 ## Зафиксированные решения
 
 - Использовать `bcrypt` с параметром `BCRYPT_ROUNDS` из env; для локальной разработки default — `12`.
@@ -40,6 +127,8 @@
 6. Заменить `any` в project controller/service на DTO и тип пользователя request.
 7. Исправить создание project: использовать `workspaceId` URL после проверки membership.
 8. Реализовать удаление текущего аккаунта с проверкой пароля и описанным `409`.
+
+После каждого шага запускайте соответствующий узкий тест. Не переносите весь файл и только затем пытайтесь исправить десятки ошибок.
 
 > [!warning] Миграции
 > Поле `User.password` уже имеет тип `String`, подходящий для bcrypt hash. Если Prisma schema не меняется, пустую migration создавать нельзя. Опубликованные migrations не редактировать.
@@ -73,4 +162,3 @@ Refresh tokens, восстановление пароля, email verification, O
 - Workspace проекта всегда задан URL и проверен.
 - DTO отсекают служебные и неизвестные поля.
 - Все перечисленные тесты и Docker-запуск проходят.
-

@@ -7,6 +7,42 @@
 
 Задачи №2 и №3 завершены. Использовать Redis 7 в Docker Compose и клиент `ioredis`. Добавить отдельный `CacheModule`/`CacheService`; бизнес-сервисы не работают с клиентом Redis напрямую.
 
+## Новые термины и файлы
+
+- **Cache-aside** — приложение сначала читает cache, при miss читает PostgreSQL и само записывает результат.
+- **TTL** — срок жизни key в секундах.
+- **Invalidation** — удаление устаревшего cache после успешной записи в БД.
+- **Cache stampede** — много одновременных miss одного key создают одинаковую нагрузку на БД.
+
+Добавьте `redis` service в корневой `docker-compose.yml`, переменные в `.env.example`, а код — в `backend/src/cache/cache.module.ts` и `cache.service.ts`. Подключите его к готовым `ProjectsService`, `DocumentsSearchService` и операциям membership из задачи №2.
+
+```yaml
+redis:
+  image: redis:7-bookworm
+  command: ["redis-server", "--appendonly", "yes"]
+  healthcheck:
+    test: ["CMD", "redis-cli", "ping"]
+```
+
+Минимальный helper не скрывает access check: policy вызывается до него.
+
+```ts
+async remember<T>(key: string, ttlSeconds: number, load: () => Promise<T>): Promise<T> {
+	try {
+		const cached = await this.redis.get(key);
+		if (cached) return JSON.parse(cached) as T;
+	} catch (error) {
+		this.logger.warn({ error, key: this.safeNamespace(key) }, 'Redis read failed');
+	}
+
+	const value = await load();
+	await this.safeSet(key, JSON.stringify(value), ttlSeconds);
+	return value;
+}
+```
+
+В project list порядок такой: `requireWorkspace(view)` -> нормализованный key -> `remember(..., () => prisma.project.findMany(...))`.
+
 ## Кешируемые операции
 
 1. `GET /workspaces/:workspaceId/projects`: TTL 60 секунд.
@@ -41,9 +77,20 @@ wsdocs:v1:workspace:{workspaceId}:search:{sha256(normalizedQuery)}
 - invalidation выполняется после успешного commit БД;
 - использовать version key или `SCAN` небольшого namespaced набора; production request не должен выполнять глобальный `KEYS *`.
 
+Практический вариант для этого проекта — workspace version: хранить `wsdocs:v1:workspace:{id}:version`, включать version в list/search keys и увеличивать `INCR` после write. Тогда не требуется искать все старые keys; они спокойно истекут по TTL.
+
 ## Конфигурация
 
 Добавить в `.env.example` и Compose: `REDIS_URL`, `CACHE_ENABLED`, TTL и lock timeout. Значения валидировать при старте. Redis получает healthcheck; backend не зависит от его readiness для запуска.
+
+## Порядок выполнения
+
+1. Поднять Redis в Compose и проверить `redis-cli ping`.
+2. Реализовать `CacheService` с безопасным degraded mode и unit-тестами.
+3. Подключить только project list, измерить miss/hit и проверить одинаковый response.
+4. Добавить version invalidation после project writes и membership changes.
+5. Подключить document search и его invalidation.
+6. Добавить lock/jitter, параллельный тест и документацию. Не начинайте со stampede-защиты до рабочего обычного cache-aside.
 
 ## Тесты
 
@@ -72,4 +119,3 @@ wsdocs:v1:workspace:{workspaceId}:search:{sha256(normalizedQuery)}
 - После write пользователь не видит устаревший список.
 - При остановленном Redis API остаётся работоспособным.
 - Тесты, документация и Docker healthcheck добавлены.
-

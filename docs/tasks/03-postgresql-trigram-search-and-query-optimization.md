@@ -7,6 +7,14 @@
 
 Задача выполняется после задачи №2: `AccessPolicyService` и workspace isolation уже работают.
 
+## Новые термины
+
+- **N+1** — один запрос получает список из N строк, после чего код делает ещё по запросу на каждую строку.
+- **Индекс** — дополнительная структура PostgreSQL для быстрого поиска. Она ускоряет подходящие чтения, но занимает место и замедляет запись.
+- **`EXPLAIN ANALYZE`** — команда PostgreSQL, которая реально выполняет SQL и показывает план, время, число строк и чтение buffers.
+- **Trigram** — тройка соседних символов. `pg_trgm` сравнивает наборы таких троек и поэтому находит близкие строки с опечатками.
+- **Ranking** — порядок результатов по релевантности.
+
 ## Зафиксированный контракт поиска
 
 `GET /workspaces/:workspaceId/documents/search?q=api&limit=20&offset=0`
@@ -29,6 +37,59 @@
 5. Найти запросы в циклах. Заменить их relation filter, include/select, `_count` или одним batch query.
 6. Для каждого добавленного индекса сохранить доказательство из `EXPLAIN (ANALYZE, BUFFERS)` до/после.
 7. Не добавлять индекс, если план и измерения не показывают пользу.
+
+## Где менять Workspace Docs
+
+- `backend/prisma/schema.prisma`: обычные модели; operator class индекса будет в migration SQL.
+- `backend/src/documents/`: search DTO, controller method и service query.
+- `backend/prisma/seed.ts`: обычный seed не раздувать; создать отдельный performance script для 10 000+ documents.
+- `backend/test/documents-search.e2e-spec.ts`: контракт и isolation.
+- `docs/performance/03-query-analysis.md`: планы до/после.
+
+Текущий `ProjectsService.get()` уже получает documents одним relation include; это не N+1 само по себе. Сначала включите Prisma query logging/test counter и посчитайте SQL.
+
+## Опорные SQL и NestJS-примеры
+
+Migration:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+CREATE INDEX "Document_title_trgm_idx"
+ON "Document"
+USING GIN ("title" gin_trgm_ops);
+```
+
+До и после индекса запускайте один запрос:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT d."id", d."title", similarity(d."title", 'api architecture') AS score
+FROM "Document" d
+JOIN "Project" p ON p."id" = d."projectId"
+WHERE p."workspaceId" = 'seed-workspace-1'
+  AND d."title" % 'api architecture'
+ORDER BY score DESC, d."updatedAt" DESC, d."id" ASC
+LIMIT 20 OFFSET 0;
+```
+
+В Prisma используйте tagged template, а не строковую склейку:
+
+```ts
+return this.prisma.$queryRaw<SearchDocumentRow[]>`
+	SELECT d."id", d."projectId", d."title", d."status", d."updatedAt",
+	       u."name" AS "authorName", similarity(d."title", ${query}) AS score
+	FROM "Document" d
+	JOIN "Project" p ON p."id" = d."projectId"
+	JOIN "User" u ON u."id" = d."authorId"
+	WHERE p."workspaceId" = ${workspaceId}
+	  AND d."title" % ${query}
+	ORDER BY score DESC, d."updatedAt" DESC, d."id" ASC
+	LIMIT ${limit} OFFSET ${offset}
+`;
+```
+
+Workspace filter находится внутри SQL до `LIMIT`: это часть защиты данных, а не косметический filter результата.
 
 ## Relation и permission rules
 
@@ -76,4 +137,3 @@
 - Нет запросов к БД внутри цикла в исследованных сценариях.
 - В репозитории есть воспроизводимый EXPLAIN-отчёт.
 - Backend проверки и e2e-тесты проходят в Docker Compose.
-

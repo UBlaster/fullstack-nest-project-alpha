@@ -27,6 +27,9 @@
 - **RBAC** отвечает на вопрос «разрешено ли роли пользователя выполнить это действие?».
 - **Изоляция данных** означает, что участник одного workspace не видит ресурсы другого workspace ни в списках, ни по известному ID.
 - `createdById` проекта и `authorId` документа в этой задаче являются данными аудита. Они не дают дополнительных прав владельцу записи.
+- **Policy** — один service с правилами доступа. Он отвечает «можно ли выполнить действие», но сам не обновляет project/document.
+- **Relation path** — цепочка связей до workspace. Для document это `Document -> Project -> WorkspaceMember`.
+- **Outsider** — аутентифицированный пользователь, который не состоит в проверяемом workspace.
 
 ## Зафиксированная матрица прав
 
@@ -120,6 +123,77 @@
 - вложенный document list/create сначала проверяет доступ к указанному project;
 - ID из body не должен позволять перенести ресурс в чужой workspace/project в обход policy.
 
+## Привязка к текущему коду
+
+Сейчас проблемные места находятся в `backend/src/resources.ts`:
+
+- `ensureProjectAccess` и `ensureDocumentAccess` повторяют membership query;
+- `DocumentsService` вызывает `new ProjectsService(this.prisma)['ensureProjectAccess'](...)` и обходит DI/private;
+- проверки разрешают любое действие любой роли;
+- workspace controller/service отсутствуют;
+- `data: { ...data }` позволяет передать служебные поля;
+- seed добавляет каждого пользователя во все три workspace, поэтому `other@example.com` не является outsider.
+
+Разнесите код в `workspaces/`, `projects/`, `documents/` и общий `access/`:
+
+```text
+backend/src/access/access-policy.service.ts
+backend/src/access/permissions.ts
+backend/src/workspaces/...
+backend/src/projects/...
+backend/src/documents/...
+backend/test/rbac.e2e-spec.ts
+```
+
+## Опорный код policy
+
+Правила должны читаться как данные, а не как десятки несвязанных `if`:
+
+```ts
+export type AccessAction = 'view' | 'create' | 'update' | 'archive' | 'delete';
+export type AccessResource = 'workspace' | 'project' | 'document';
+
+const projectPermissions: Record<AccessAction, WorkspaceRole[]> = {
+	view: ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'],
+	create: ['OWNER', 'ADMIN', 'MEMBER'],
+	update: ['OWNER', 'ADMIN', 'MEMBER'],
+	archive: ['OWNER', 'ADMIN', 'MEMBER'],
+	delete: ['OWNER', 'ADMIN'],
+};
+```
+
+Пример проверки project с правильным порядком `ресурс -> membership -> роль`:
+
+```ts
+async requireProject(userId: string, projectId: string, action: AccessAction) {
+	const project = await this.prisma.project.findUnique({ where: { id: projectId } });
+	if (!project) throw new NotFoundException();
+
+	const membership = await this.prisma.workspaceMember.findUnique({
+		where: {
+			userId_workspaceId: { userId, workspaceId: project.workspaceId },
+		},
+	});
+	if (!membership) throw new NotFoundException();
+	if (!projectPermissions[action].includes(membership.role)) {
+		throw new ForbiddenException();
+	}
+
+	return { project, membership };
+}
+```
+
+Document загружайте с relation, нужным для workspace check:
+
+```ts
+const document = await this.prisma.document.findUnique({
+	where: { id: documentId },
+	include: { project: { select: { workspaceId: true } } },
+});
+```
+
+Create собирайте явно: `{ title: dto.title, content: dto.content, projectId, authorId: userId }`. `projectId` и `authorId` из body не принимать.
+
 ## План выполнения
 
 ### Этап 1. Подготовить модель и тестовые данные
@@ -166,6 +240,22 @@
 - изменение body не позволяет подменить relation или автора.
 
 Не ограничивайтесь проверкой status code: для успешных запросов проверьте важные поля ответа и фактическую запись в БД.
+
+```ts
+it.each([
+	['owner@example.com', 200],
+	['admin@example.com', 200],
+	['member@example.com', 200],
+	['viewer@example.com', 403],
+])('PATCH project as %s -> %s', async (email, expectedStatus) => {
+	const token = await login(email);
+	await request(app.getHttpServer())
+		.patch(`/projects/${projectId}`)
+		.set('Authorization', `Bearer ${token}`)
+		.send({ name: 'Renamed project' })
+		.expect(expectedStatus);
+});
+```
 
 ### Этап 5. Документация и проверка
 

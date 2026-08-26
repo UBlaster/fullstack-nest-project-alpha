@@ -7,6 +7,44 @@
 
 Задачи №4 и №5 завершены. Использовать BullMQ поверх Redis, отдельный Nest application `worker`, существующий `ObjectStorageService` и PostgreSQL как источник статуса job.
 
+## Новые термины и структура
+
+- **Worker** — отдельный Node.js process, который получает job из очереди; это не HTTP backend.
+- **Acknowledgement (ack)** — подтверждение очереди, что job завершена и не нужна повторная доставка.
+- **Retry/backoff** — повтор после временной ошибки с растущей задержкой.
+- **DLQ** — отдельная dead-letter queue для jobs, исчерпавших retries.
+- **Transactional outbox** — таблица событий, записанная в одной PostgreSQL-транзакции с business row; закрывает потерю между DB commit и enqueue.
+
+Создайте `backend/src/exports/`, `backend/src/queue/`, `backend/src/outbox/` и entry point `backend/src/worker.ts`. В `backend/package.json` добавьте `start:worker:dev`; в Compose — отдельный `worker`, использующий тот же image, env и source volume, но другую command.
+
+API не вызывает `queue.add()` сразу после отдельного `prisma.exportJob.create()`. Нужна общая транзакция:
+
+```ts
+const exportJob = await this.prisma.$transaction(async (tx) => {
+	const created = await tx.exportJob.create({ data: jobData });
+	await tx.outboxEvent.create({
+		data: {
+			type: 'EXPORT_REQUESTED',
+			aggregateId: created.id,
+			payload: { exportJobId: created.id },
+		},
+	});
+	return created;
+});
+```
+
+Worker начинает с атомарного claim:
+
+```ts
+const claimed = await prisma.exportJob.updateMany({
+	where: { id: job.id, status: 'QUEUED' },
+	data: { status: 'PROCESSING', startedAt: new Date() },
+});
+if (claimed.count === 0) return;
+```
+
+Если job уже `COMPLETED`, duplicate delivery должна закончиться без второго файла.
+
 ## Модель `ExportJob`
 
 Поля: `id`, `workspaceId`, `requestedById`, `status`, `filters` JSON, `queueJobId` unique, `objectKey?`, `errorCode?`, `attempts`, `expiresAt?`, `createdAt`, `startedAt?`, `finishedAt?`, `cancelRequestedAt?`.
@@ -46,6 +84,15 @@ Create требует permission view/export workspace. Get/cancel доступ�
 
 Периодический recovery возвращает в `QUEUED` jobs `PROCESSING` без heartbeat дольше 5 минут. Completed object живёт 24 часа, затем cleanup удаляет файл и помечает expiry. Ошибки содержат стабильный `errorCode`, но не stack trace в API.
 
+## Порядок выполнения
+
+1. Добавить `ExportJob`/outbox migration и state transitions.
+2. Реализовать create/status API без очереди и протестировать RBAC.
+3. Подключить BullMQ dispatcher и отдельный worker с простым test job.
+4. Перенести потоковый export задачи №5 в processor.
+5. Добавить duplicate/retry/DLQ/cancel, затем recovery и graceful shutdown.
+6. Добавить retention cleanup и полный e2e от `POST` до download.
+
 ## Тесты
 
 - успешные create -> processing -> completed -> download;
@@ -62,4 +109,3 @@ Create требует permission view/export workspace. Get/cancel доступ�
 ## Документация и критерии приёмки
 
 Создать `docs/infrastructure/06-background-exports.md`: state machine, job payload, retries, DLQ, recovery, runbook. API не ждёт формирования CSV. После рестарта backend/worker queued jobs не теряются, повторная доставка не создаёт второй export.
-
