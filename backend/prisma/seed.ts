@@ -1,70 +1,119 @@
-import { PrismaClient, WorkspaceRole, ProjectStatus, DocumentStatus } from '@prisma/client';
-const p = new PrismaClient();
+import { DocumentStatus, PrismaClient, ProjectStatus, WorkspaceRole } from '@prisma/client';
+
+const prisma = new PrismaClient();
+
 async function main() {
+	const existingUsers = await prisma.user.count();
+	if (existingUsers > 0) {
+		console.log(`Seed skipped: database already contains ${existingUsers} user(s)`);
+		return;
+	}
+
 	const password = 'password123';
 	const users = [];
+
 	for (const [email, name] of [
 		['admin@example.com', 'Admin User'],
 		['member@example.com', 'Member User'],
 		['viewer@example.com', 'Viewer User'],
 		['other@example.com', 'Other User'],
-	])
+	]) {
 		users.push(
-			await p.user.upsert({
-				where: { email },
-				update: { password },
-				create: { email, name, password },
+			await prisma.user.upsert({
+				where: {
+					email,
+				},
+				update: {
+					password,
+				},
+				create: {
+					email,
+					name,
+					password,
+				},
 			}),
 		);
+	}
+
 	const roles = [
 		WorkspaceRole.OWNER,
 		WorkspaceRole.ADMIN,
 		WorkspaceRole.MEMBER,
 		WorkspaceRole.VIEWER,
 	];
-	for (let w = 0; w < 3; w++) {
-		const ws = await p.workspace.upsert({
-			where: { id: `seed-workspace-${w + 1}` },
+
+	for (let workspaceIndex = 0; workspaceIndex < 3; workspaceIndex++) {
+		const workspace = await prisma.workspace.upsert({
+			where: {
+				id: `seed-workspace-${workspaceIndex + 1}`,
+			},
 			update: {},
-			create: { id: `seed-workspace-${w + 1}`, name: `Workspace ${String.fromCharCode(65 + w)}` },
+			create: {
+				id: `seed-workspace-${workspaceIndex + 1}`,
+				name: `Workspace ${String.fromCharCode(65 + workspaceIndex)}`,
+			},
 		});
-		for (let i = 0; i < users.length; i++)
-			await p.workspaceMember.upsert({
-				where: { userId_workspaceId: { userId: users[i].id, workspaceId: ws.id } },
-				update: { role: roles[(i + w) % roles.length] },
-				create: { userId: users[i].id, workspaceId: ws.id, role: roles[(i + w) % roles.length] },
-			});
-		for (let j = 0; j < 40; j++) {
-			const project = await p.project.upsert({
-				where: { id: `seed-project-${w}-${j}` },
-				update: {},
+
+		for (let userIndex = 0; userIndex < users.length; userIndex++) {
+			await prisma.workspaceMember.upsert({
+				where: {
+					userId_workspaceId: {
+						userId: users[userIndex].id,
+						workspaceId: workspace.id,
+					},
+				},
+				update: {
+					role: roles[(userIndex + workspaceIndex) % roles.length],
+				},
 				create: {
-					id: `seed-project-${w}-${j}`,
-					workspaceId: ws.id,
-					name: `${['Backend Platform', 'Product Knowledge', 'Internal Documentation'][j % 3]} ${j + 1}`,
-					description: 'Учебный production-like проект',
-					status: j % 9 === 0 ? ProjectStatus.ARCHIVED : ProjectStatus.ACTIVE,
-					createdById: users[(j + w) % users.length].id,
+					userId: users[userIndex].id,
+					workspaceId: workspace.id,
+					role: roles[(userIndex + workspaceIndex) % roles.length],
 				},
 			});
-			for (let k = 0; k < 30; k++)
-				await p.document.upsert({
-					where: { id: `seed-document-${w}-${j}-${k}` },
+		}
+
+		for (let projectIndex = 0; projectIndex < 40; projectIndex++) {
+			const project = await prisma.project.upsert({
+				where: {
+					id: `seed-project-${workspaceIndex}-${projectIndex}`,
+				},
+				update: {},
+				create: {
+					id: `seed-project-${workspaceIndex}-${projectIndex}`,
+					workspaceId: workspace.id,
+					name: `${['Backend Platform', 'Product Knowledge', 'Internal Documentation'][projectIndex % 3]} ${projectIndex + 1}`,
+					description: 'Учебный production-like проект',
+					status: projectIndex % 9 === 0 ? ProjectStatus.ARCHIVED : ProjectStatus.ACTIVE,
+					createdById: users[(projectIndex + workspaceIndex) % users.length].id,
+				},
+			});
+
+			for (let documentIndex = 0; documentIndex < 30; documentIndex++) {
+				await prisma.document.upsert({
+					where: {
+						id: `seed-document-${workspaceIndex}-${projectIndex}-${documentIndex}`,
+					},
 					update: {},
 					create: {
-						id: `seed-document-${w}-${j}-${k}`,
+						id: `seed-document-${workspaceIndex}-${projectIndex}-${documentIndex}`,
 						projectId: project.id,
-						authorId: users[(k + j) % users.length].id,
-						title: `Document ${k + 1}: API and architecture`,
+						authorId: users[(documentIndex + projectIndex) % users.length].id,
+						title: `Document ${documentIndex + 1}: API and architecture`,
 						content:
-							`Учебный документ ${k + 1}. Архитектура, API, database migrations and deployment notes. `.repeat(
-								(k % 4) + 1,
+							`Учебный документ ${documentIndex + 1}. Архитектура, API, database migrations and deployment notes. `.repeat(
+								(documentIndex % 4) + 1,
 							),
-						status: [DocumentStatus.DRAFT, DocumentStatus.ACTIVE, DocumentStatus.ARCHIVED][k % 3],
+						status: [DocumentStatus.DRAFT, DocumentStatus.ACTIVE, DocumentStatus.ARCHIVED][
+							documentIndex % 3
+						],
 					},
 				});
+			}
 		}
 	}
+
 	console.log('Seed completed');
 }
-main().finally(() => p.$disconnect());
+
+main().finally(() => prisma.$disconnect());

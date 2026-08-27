@@ -5,7 +5,10 @@ import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { createAppValidationPipe } from '../src/validation.pipe';
 
-const credentials = { email: 'admin@example.com', password: 'password123' };
+const credentials = {
+	email: 'admin@example.com',
+	password: 'password123',
+};
 
 describe('Auth (e2e)', () => {
 	let app: INestApplication;
@@ -33,14 +36,19 @@ describe('Auth (e2e)', () => {
 			.expect(200);
 
 		expect(res.body.accessToken).toEqual(expect.any(String));
-		expect(res.body.user).toMatchObject({ email: credentials.email });
+		expect(res.body.user).toMatchObject({
+			email: credentials.email,
+		});
 		token = res.body.accessToken;
 	});
 
 	it('ignores extra body fields and still logs in', async () => {
 		const res = await request(app.getHttpServer())
 			.post('/auth/login')
-			.send({ ...credentials, extra: 'ignored' })
+			.send({
+				...credentials,
+				extra: 'ignored',
+			})
 			.expect(200);
 
 		expect(res.body.accessToken).toEqual(expect.any(String));
@@ -49,7 +57,10 @@ describe('Auth (e2e)', () => {
 	it('rejects a wrong password', async () => {
 		const res = await request(app.getHttpServer())
 			.post('/auth/login')
-			.send({ email: credentials.email, password: 'wrong-password' })
+			.send({
+				email: credentials.email,
+				password: 'wrong-password',
+			})
 			.expect(401);
 
 		expect(res.body.message).toBe('Invalid credentials');
@@ -58,7 +69,10 @@ describe('Auth (e2e)', () => {
 	it('rejects an unknown email', async () => {
 		const res = await request(app.getHttpServer())
 			.post('/auth/login')
-			.send({ email: 'missing@example.com', password: credentials.password })
+			.send({
+				email: 'missing@example.com',
+				password: credentials.password,
+			})
 			.expect(401);
 
 		expect(res.body.message).toBe('Invalid credentials');
@@ -71,14 +85,20 @@ describe('Auth (e2e)', () => {
 	it('returns 400 for an invalid email', async () => {
 		await request(app.getHttpServer())
 			.post('/auth/login')
-			.send({ email: 'not-an-email', password: credentials.password })
+			.send({
+				email: 'not-an-email',
+				password: credentials.password,
+			})
 			.expect(400);
 	});
 
 	it('returns 400 for an empty password', async () => {
 		await request(app.getHttpServer())
 			.post('/auth/login')
-			.send({ email: credentials.email, password: '' })
+			.send({
+				email: credentials.email,
+				password: '',
+			})
 			.expect(400);
 	});
 
@@ -88,7 +108,9 @@ describe('Auth (e2e)', () => {
 			.set('Authorization', `Bearer ${token}`)
 			.expect(200);
 
-		expect(res.body).toMatchObject({ email: credentials.email });
+		expect(res.body).toMatchObject({
+			email: credentials.email,
+		});
 	});
 
 	it('rejects GET /auth/me without a token', async () => {

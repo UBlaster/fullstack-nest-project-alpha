@@ -23,7 +23,10 @@ export function LoginPage() {
 					try {
 						const response = await api('/auth/login', {
 							method: 'POST',
-							body: JSON.stringify({ email, password }),
+							body: JSON.stringify({
+								email,
+								password,
+							}),
 						});
 						localStorage.setItem('token', response.accessToken);
 						navigate('/projects');
