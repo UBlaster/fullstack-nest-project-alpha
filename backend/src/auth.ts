@@ -11,11 +11,11 @@ import {
 	UseGuards,
 } from '@nestjs/common';
 import { JwtModule, JwtService } from '@nestjs/jwt';
-import { AuthGuard } from '@nestjs/passport';
-import { PassportStrategy } from '@nestjs/passport';
+import { AuthGuard, PassportStrategy } from '@nestjs/passport';
 import { Strategy } from 'passport-jwt';
 import { IsEmail, IsNotEmpty, IsString } from 'class-validator';
 import { PrismaService } from './prisma.service';
+
 class LoginDto {
 	@IsEmail()
 	@IsNotEmpty()
@@ -25,6 +25,7 @@ class LoginDto {
 	@IsNotEmpty()
 	password!: string;
 }
+
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
 	constructor() {
@@ -34,49 +35,81 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 			secretOrKey: process.env.JWT_SECRET || 'dev-secret',
 		});
 	}
+
 	validate(payload: any) {
 		return payload;
 	}
 }
+
 @Injectable()
 export class AuthService {
 	constructor(
 		private prisma: PrismaService,
 		private jwt: JwtService,
 	) {}
+
 	async login(dto: LoginDto) {
-		const user = await this.prisma.user.findUnique({ where: { email: dto.email } });
-		if (!user || user.password !== dto.password)
+		const user = await this.prisma.user.findUnique({
+			where: {
+				email: dto.email,
+			},
+		});
+		if (!user || user.password !== dto.password) {
 			throw new UnauthorizedException('Invalid credentials');
+		}
+
 		return {
-			accessToken: this.jwt.sign({ sub: user.id, email: user.email }),
-			user: { id: user.id, email: user.email, name: user.name },
+			accessToken: this.jwt.sign({
+				sub: user.id,
+				email: user.email,
+			}),
+			user: {
+				id: user.id,
+				email: user.email,
+				name: user.name,
+			},
 		};
 	}
+
 	async me(id: string) {
 		return this.prisma.user.findUnique({
-			where: { id },
-			select: { id: true, email: true, name: true, createdAt: true },
+			where: {
+				id,
+			},
+			select: {
+				id: true,
+				email: true,
+				name: true,
+				createdAt: true,
+			},
 		});
 	}
 }
+
 @Controller('auth')
 export class AuthController {
 	constructor(private authService: AuthService) {}
+
 	@Post('login')
 	@HttpCode(200)
 	login(@Body() dto: LoginDto) {
 		return this.authService.login(dto);
 	}
-	@UseGuards(AuthGuard('jwt')) @Get('me') me(@Req() request: any) {
+
+	@UseGuards(AuthGuard('jwt'))
+	@Get('me')
+	me(@Req() request: any) {
 		return this.authService.me(request.user.sub);
 	}
 }
+
 @Module({
 	imports: [
 		JwtModule.register({
 			secret: process.env.JWT_SECRET || 'dev-secret',
-			signOptions: { expiresIn: process.env.JWT_EXPIRES_IN || '1d' },
+			signOptions: {
+				expiresIn: process.env.JWT_EXPIRES_IN || '1d',
+			},
 		}),
 	],
 	controllers: [AuthController],

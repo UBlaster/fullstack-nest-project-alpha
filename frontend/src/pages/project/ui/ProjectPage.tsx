@@ -17,18 +17,22 @@ export function ProjectPage() {
 	useEffect(() => {
 		load();
 	}, [id]);
-	if (error)
+
+	if (error) {
 		return (
 			<Layout>
 				<p>!Ошибка: {error}</p>
 			</Layout>
 		);
-	if (!project)
+	}
+
+	if (!project) {
 		return (
 			<Layout>
 				<p>Загрузка...</p>
 			</Layout>
 		);
+	}
 
 	return (
 		<Layout>
@@ -60,7 +64,11 @@ export function ProjectPage() {
 					onClick={async () => {
 						await api(`/projects/${id}/documents`, {
 							method: 'POST',
-							body: JSON.stringify({ title, content, status: 'DRAFT' }),
+							body: JSON.stringify({
+								title,
+								content,
+								status: 'DRAFT',
+							}),
 						});
 						setTitle('');
 						setContent('');

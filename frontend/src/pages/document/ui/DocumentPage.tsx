@@ -22,19 +22,21 @@ export function DocumentPage() {
 			});
 	}, [id]);
 
-	if (error)
+	if (error) {
 		return (
 			<Layout>
 				<p>{error}</p>
 			</Layout>
 		);
+	}
 
-	if (!doc)
+	if (!doc) {
 		return (
 			<Layout>
 				<p>Загрузка...</p>
 			</Layout>
 		);
+	}
 
 	return (
 		<Layout>
@@ -46,7 +48,10 @@ export function DocumentPage() {
 				onClick={async () => {
 					await api('/documents/' + id, {
 						method: 'PATCH',
-						body: JSON.stringify({ title, content }),
+						body: JSON.stringify({
+							title,
+							content,
+						}),
 					});
 					alert('Сохранено');
 				}}
@@ -56,7 +61,9 @@ export function DocumentPage() {
 			<button
 				className="danger"
 				onClick={async () => {
-					await api('/documents/' + id, { method: 'DELETE' });
+					await api('/documents/' + id, {
+						method: 'DELETE',
+					});
 					location.href = `/projects/${doc.projectId}`;
 				}}
 			>
