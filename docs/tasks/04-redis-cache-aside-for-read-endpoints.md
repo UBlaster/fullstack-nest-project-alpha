@@ -3,41 +3,32 @@
 > [!summary] Результат
 > Списки проектов и trigram search кешируются безопасно по workspace, записи инвалидируются после изменений, а падение Redis не ломает API.
 
+> [!note] Связанный материал
+> См. [памятку к задаче 4](../guides/04-redis-cache-aside-primer.md).
+
+## Проблема
+
+Повторные project list и document search каждый раз выполняют одинаковую работу в PostgreSQL. Простое добавление Redis опасно: общий key может смешать workspace, устаревший value пережить write, а недоступный cache превратить рабочий API в `500`.
+
 ## Предусловия и стек
 
 Задачи №2 и №3 завершены. Использовать Redis 7 в Docker Compose и клиент `ioredis`. Добавить отдельный `CacheModule`/`CacheService`; бизнес-сервисы не работают с клиентом Redis напрямую.
-
-## Новые термины и файлы
-
-- **Cache-aside** — приложение сначала читает cache, при miss читает PostgreSQL и само записывает результат.
-- **TTL** — срок жизни key в секундах.
-- **Invalidation** — удаление устаревшего cache после успешной записи в БД.
-- **Cache stampede** — много одновременных miss одного key создают одинаковую нагрузку на БД.
 
 Добавьте `redis` service в корневой `docker-compose.yml`, переменные в `.env.example`, а код — в `backend/src/cache/cache.module.ts` и `cache.service.ts`. Подключите его к готовым `ProjectsService`, `DocumentsSearchService` и операциям membership из задачи №2.
 
 ```yaml
 redis:
   image: redis:7-bookworm
-  command: ["redis-server", "--appendonly", "yes"]
-  healthcheck:
-    test: ["CMD", "redis-cli", "ping"]
+  # Добавить command, volume и healthcheck.
 ```
 
-Минимальный helper не скрывает access check: policy вызывается до него.
+`CacheService` не должен скрывать access check: policy вызывается до него.
 
 ```ts
-async remember<T>(key: string, ttlSeconds: number, load: () => Promise<T>): Promise<T> {
-	try {
-		const cached = await this.redis.get(key);
-		if (cached) return JSON.parse(cached) as T;
-	} catch (error) {
-		this.logger.warn({ error, key: this.safeNamespace(key) }, 'Redis read failed');
-	}
-
-	const value = await load();
-	await this.safeSet(key, JSON.stringify(value), ttlSeconds);
-	return value;
+export class CacheService {
+	// remember(key, ttl, load): cache hit/miss и fallback к load()
+	// invalidateWorkspace(workspaceId): увеличить version namespace
+	// withLock(key, load): защита от stampede с TTL и token владельца
 }
 ```
 
@@ -83,27 +74,6 @@ wsdocs:v1:workspace:{workspaceId}:search:{sha256(normalizedQuery)}
 
 Добавить в `.env.example` и Compose: `REDIS_URL`, `CACHE_ENABLED`, TTL и lock timeout. Значения валидировать при старте. Redis получает healthcheck; backend не зависит от его readiness для запуска.
 
-## Порядок выполнения
-
-1. Поднять Redis в Compose и проверить `redis-cli ping`.
-2. Реализовать `CacheService` с безопасным degraded mode и unit-тестами.
-3. Подключить только project list, измерить miss/hit и проверить одинаковый response.
-4. Добавить version invalidation после project writes и membership changes.
-5. Подключить document search и его invalidation.
-6. Добавить lock/jitter, параллельный тест и документацию. Не начинайте со stampede-защиты до рабочего обычного cache-aside.
-
-## Тесты
-
-- первый запрос — miss + DB + set; второй — hit без DB query;
-- разные workspace/query получают разные keys;
-- outsider не получает cached response чужого workspace;
-- create/update/archive/delete инвалидируют нужные данные;
-- изменение role/membership инвалидирует cache;
-- Redis get/set/connect error приводит к корректному ответу из PostgreSQL;
-- 10 параллельных miss не вызывают 10 одинаковых DB query при доступном lock;
-- битый JSON удаляется/игнорируется и восстанавливается из БД;
-- TTL и jitter находятся в заданных границах.
-
 ## Документация
 
 Создать `docs/infrastructure/04-redis-cache.md`: endpoints, keys, TTL, invalidation matrix, degraded mode, локальная проверка hit/miss и очистка только dev namespace.
@@ -118,4 +88,4 @@ wsdocs:v1:workspace:{workspaceId}:search:{sha256(normalizedQuery)}
 - Cache изолирован по workspace и не обходит RBAC.
 - После write пользователь не видит устаревший список.
 - При остановленном Redis API остаётся работоспособным.
-- Тесты, документация и Docker healthcheck добавлены.
+- Документация и Docker healthcheck добавлены.

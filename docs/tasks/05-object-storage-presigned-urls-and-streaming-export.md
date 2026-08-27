@@ -3,43 +3,41 @@
 > [!summary] Результат
 > Файлы документов хранятся в MinIO/S3, загружаются по короткоживущим presigned URLs с RBAC-проверкой, а большой CSV export передаётся потоком без накопления всего набора в памяти.
 
+> [!note] Связанный материал
+> См. [памятку к задаче 5](../guides/05-object-storage-presigned-urls-and-streams-primer.md).
+
+## Проблема
+
+Workspace Docs не умеет хранить файлы документов и выдавать их без передачи secrets клиенту. Большой CSV export также нельзя сначала собирать целиком в массив или `Buffer`: объём данных будет напрямую увеличивать память backend process.
+
 ## Предусловие и стек
 
 Задача №2 завершена. Для разработки использовать MinIO в Docker Compose, AWS SDK v3 (`@aws-sdk/client-s3`, `@aws-sdk/s3-request-presigner`) и интерфейс `ObjectStorageService` с реализацией `S3ObjectStorageService`.
-
-## Новые термины и место в проекте
-
-- **Object storage** хранит file bytes по строковому object key; это не файловая папка backend container.
-- **Presigned URL** — URL с временной подписью, разрешающий одну операцию без выдачи клиенту S3 secret.
-- **Stream** — обработка данных порциями. **Backpressure** останавливает producer, когда consumer не успевает.
-- **Orphan object** — файл в bucket, для которого нет актуальной записи БД.
 
 Добавьте MinIO service/bucket-init в `docker-compose.yml`, S3 env в `.env.example`, `backend/src/storage/`, `backend/src/document-files/` и migration с `DocumentFile`. Не добавляйте binary column в существующую `Document`.
 
 ```ts
 export interface ObjectStorageService {
-	createUploadUrl(input: { key: string; mimeType: string; expiresIn: number }): Promise<string>;
-	createDownloadUrl(input: { key: string; fileName: string; expiresIn: number }): Promise<string>;
-	head(key: string): Promise<{ size: number; etag?: string }>;
-	remove(key: string): Promise<void>;
+	// createUploadUrl(...)
+	// createDownloadUrl(...)
+	// head(...)
+	// remove(...)
 }
 ```
 
 Key строит backend, а не DTO:
 
 ```ts
-const objectKey = `workspaces/${workspaceId}/documents/${documentId}/${randomUUID()}`;
+const objectKey = /* сформировать из workspaceId, documentId и UUID */;
 ```
 
 Для CSV не делайте `const rows = await findMany()` на весь workspace. Читайте batches и уважайте `response.write()`:
 
 ```ts
-for await (const row of this.documents.iterateForExport(workspaceId, 500)) {
-	if (!response.write(toCsvRow(row))) {
-		await once(response, 'drain');
-	}
+export class DocumentsExportService {
+	// iterateForExport(): читать документы batches через keyset pagination
+	// writeCsv(): экранировать поля, учитывать backpressure и disconnect
 }
-response.end();
 ```
 
 Обработчик `request.on('close')` должен выставить abort flag, чтобы generator не запросил следующую страницу.
@@ -86,27 +84,6 @@ response.end();
 
 Сначала установить `DELETING`, затем удалить object, затем metadata. Ошибку оставить повторяемой; отсутствующий object считать уже удалённым. Добавить команду очистки `PENDING` старше 24 часов и orphan-check в dry-run режиме.
 
-## Порядок выполнения
-
-1. Поднять MinIO и автоматически создать private bucket.
-2. Добавить `DocumentFile` migration и storage interface/adapter.
-3. Реализовать upload-url -> complete -> download-url happy path.
-4. Добавить RBAC, validation и отрицательные тесты.
-5. Реализовать идемпотентное удаление и cleanup-команды.
-6. Отдельно реализовать CSV stream, затем проверить memory/disconnect. Не смешивайте debugging upload и export в одном шаге.
-
-## Тесты
-
-- RBAC для upload/download/delete и outsider `404`;
-- invalid MIME, extension, size и чужой file/document relation;
-- URL имеет ограниченный expiry и не содержит secrets в API logs;
-- complete отклоняет отсутствующий object или неверный size;
-- повторный delete безопасен, ошибка storage повторяется;
-- CSV корректно экранируется, не содержит content/чужие workspace;
-- export 50 000 строк сохраняет ограниченное потребление памяти;
-- disconnect останавливает pagination;
-- недоступный MinIO возвращает контролируемый `503`, не повреждая metadata.
-
 ## Документация и критерии приёмки
 
-Создать `docs/infrastructure/05-object-storage-and-export.md` с env, локальной проверкой, lifecycle и orphan cleanup. Migration, MinIO healthcheck, тесты и Docker-запуск обязательны. Полный dataset CSV и file bodies не загружаются в память backend.
+Создать `docs/infrastructure/05-object-storage-and-export.md` с env, локальной проверкой, lifecycle и orphan cleanup. Migration, MinIO healthcheck и Docker-запуск обязательны. Полный dataset CSV и file bodies не загружаются в память backend.

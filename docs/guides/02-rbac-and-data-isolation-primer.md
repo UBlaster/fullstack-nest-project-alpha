@@ -5,6 +5,31 @@
 
 Эта памятка объясняет ход работы на упрощённом примере `Team -> Board -> Note`. Это не готовая реализация для Workspace Docs Starter: названия сущностей, набор действий и детали запросов намеренно отличаются.
 
+## Контекст учебного примера
+
+Сервис командных досок хранит заметки внутри доски, а доски — внутри команды. Доступ определяется записью `TeamMember` и ролью `LEAD`, `EDITOR` или `READER`.
+
+```mermaid
+flowchart LR
+	User --> TeamMember
+	TeamMember --> Team
+	Team --> Board
+	Board --> Note
+```
+
+## Ключевые термины
+
+- **Authentication** подтверждает, кто отправил запрос; в примере это делает JWT guard.
+- **Authorization** определяет, разрешено ли найденному пользователю выполнить действие.
+- **RBAC** — модель, в которой разрешения зависят от роли пользователя.
+- **Tenant** — изолированная область данных одного клиента или команды; здесь это `Team`.
+- **Membership** — запись, связывающая пользователя, tenant и роль.
+- **Policy** — общий компонент с правилами доступа, который не выполняет business operation.
+- **Scope** — граница, внутри которой действует membership или разрешение.
+- **Ownership** — дополнительное правило, зависящее от автора конкретной записи, а не только от роли.
+- **Relation path** — цепочка связей от ресурса до tenant, например `Note -> Board -> Team`.
+- **Outsider** — аутентифицированный пользователь без membership в проверяемом tenant.
+
 ## 1. Сначала разделяют authentication и authorization
 
 JWT guard подтверждает личность и кладёт идентификатор пользователя в request. Он не отвечает на вопрос, разрешено ли пользователю удалить конкретную запись.
@@ -21,16 +46,23 @@ JWT валиден?
 
 Если смешать эти проверки в каждом CRUD-методе, правила быстро начинают отличаться друг от друга.
 
+> [!note] Аналогия для frontend
+>
+> - **React:** скрытие кнопки через компонент вроде `<Can action="update" />` улучшает UI, но не защищает API.
+> - **Vue:** проверка роли в `v-if` или navigation guard улучшает UI, но не защищает API.
+> - **Backend:** NestJS обязан заново проверить membership и роль, потому что endpoint можно вызвать без frontend.
+
 ## 2. Права описывают до написания guard
 
 Пример для другой системы:
 
-| Действие | LEAD | EDITOR | READER |
-| --- | :---: | :---: | :---: |
-| Читать board | ✅ | ✅ | ✅ |
-| Создавать note | ✅ | ✅ | ❌ |
-| Изменять note | ✅ | ✅ | ❌ |
-| Удалять board | ✅ | ❌ | ❌ |
+| Действие           | LEAD | EDITOR | READER |
+| ------------------ | :--: | :----: | :----: |
+| Читать board       |  ✅  |   ✅   |   ✅   |
+| Создавать note     |  ✅  |   ✅   |   ❌   |
+| Изменять note      |  ✅  |   ✅   |   ❌   |
+| Архивировать board |  ✅  |   ❌   |   ❌   |
+| Удалять board      |  ✅  |   ❌   |   ❌   |
 
 Из таблицы удобно получить кодовую структуру:
 
@@ -39,6 +71,7 @@ const permissions = {
 	viewBoard: ['LEAD', 'EDITOR', 'READER'],
 	createNote: ['LEAD', 'EDITOR'],
 	updateNote: ['LEAD', 'EDITOR'],
+	archiveBoard: ['LEAD'],
 	deleteBoard: ['LEAD'],
 } as const;
 ```
@@ -91,6 +124,35 @@ Feature-сервис после успешной проверки выполня
 
 Guard удобен, когда параметры доступа легко получить до вызова handler. Policy-сервис удобнее, когда сначала нужно пройти relation path через базу. В небольшом проекте допустимо сочетать JWT guard с policy-сервисом в feature service.
 
+Если policy нужен нескольким feature-модулям, Nest должен создать его через dependency injection. Модуль-владелец экспортирует provider, а потребители импортируют модуль:
+
+```ts
+@Module({
+	providers: [AccessPolicyService],
+	exports: [AccessPolicyService],
+})
+export class AccessModule {}
+
+@Module({
+	imports: [AccessModule],
+	controllers: [NotesController],
+	providers: [NotesService],
+})
+export class NotesModule {}
+```
+
+Тогда `NotesService` получает policy через constructor, а не создаёт его вручную:
+
+```ts
+@Injectable()
+export class NotesService {
+	constructor(
+		private readonly prisma: PrismaService,
+		private readonly accessPolicy: AccessPolicyService,
+	) {}
+}
+```
+
 ## 5. Порядок проверок определяет 403 или 404
 
 При политике сокрытия существования обычно используют такой порядок:
@@ -114,7 +176,7 @@ where: {
 }
 ```
 
-После получения списка полезно тестом проверить отсутствие конкретного чужого ID, а не только `Array.isArray(response.body)`.
+List должен сразу исключать чужие IDs, а не возвращать общий набор с последующей фильтрацией в JavaScript.
 
 ## 6. Идентификаторам из body нельзя безусловно доверять
 
@@ -133,45 +195,19 @@ data: {
 
 DTO должен перечислять редактируемые клиентом поля. Relation IDs и служебные поля в него обычно не включают.
 
-## 7. Как строят тесты матрицы
-
-Для одной операции удобно использовать табличный тест:
-
-```ts
-it.each([
-	['LEAD', 200],
-	['EDITOR', 200],
-	['READER', 403],
-])('update note: %s receives %s', async (role, status) => {
-	// получить токен пользователя с role
-	// отправить PATCH
-	// проверить status и результат
-});
-```
-
-Кроме матрицы нужны отдельные security-сценарии:
-
-- outsider знает ID чужой записи и получает `404`;
-- пользователь подставляет parent ID из другого scope;
-- пользователь передаёт чужой `authorId` или `teamId` в body;
-- list содержит свои IDs и не содержит чужие;
-- после успешного update состояние действительно изменилось;
-- после запрещённого update состояние не изменилось.
-
-Seed удобен для ручной проверки, но e2e-тесты надёжнее, когда их fixtures однозначны и не зависят от порядка записей в базе.
-
-## 8. Переиспользуемый каркас policy
+## 7. Переиспользуемый каркас policy
 
 Для любого tenant-проекта можно отделить загрузку scope от проверки permission:
 
 ```ts
 type Role = 'LEAD' | 'EDITOR' | 'READER';
-type Action = 'view' | 'create' | 'update' | 'delete';
+type Action = 'view' | 'create' | 'update' | 'archive' | 'delete';
 
 const permissions: Record<Action, readonly Role[]> = {
 	view: ['LEAD', 'EDITOR', 'READER'],
 	create: ['LEAD', 'EDITOR'],
 	update: ['LEAD', 'EDITOR'],
+	archive: ['LEAD'],
 	delete: ['LEAD'],
 };
 
@@ -207,7 +243,49 @@ return prisma.note.findMany({
 });
 ```
 
-## 9. Частые ошибки
+## 8. Status меняют отдельным контрактом
+
+Обычный update DTO не должен включать server-managed поля вроде `status`. При глобальном `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true })` лишнее поле будет отклонено, а не незаметно передано в ORM:
+
+```ts
+export class UpdateBoardDto {
+	@IsOptional()
+	@IsString()
+	name?: string;
+}
+
+@Patch(':boardId/archive')
+archive(@Param('boardId') boardId: string, @CurrentUser() user: AuthUser) {
+	return this.boardsService.archive(boardId, user.id);
+}
+```
+
+Так `archive` получает собственную permission-проверку и не превращается в скрытую возможность любого `PATCH`.
+
+## 9. Аддитивное поле статуса добавляют миграцией
+
+Для нового enum и колонки сначала меняют Prisma schema, затем создают обычную migration:
+
+```prisma
+enum BoardStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+model Board {
+  id     String      @id @default(uuid())
+  status BoardStatus @default(ACTIVE)
+}
+```
+
+```bash
+npx prisma migrate dev --name add-board-status
+npx prisma generate
+```
+
+Default сохраняет совместимость со старыми create-вызовами и существующими строками. Перед применением проверяют сгенерированный `migration.sql`; `prisma db push` не заменяет versioned migration.
+
+## 10. Частые ошибки
 
 - Искать membership через `findFirst({ where: { userId } })` без ID нужного scope.
 - Считать, что фильтра в list достаточно, и забывать get/update/delete по ID.
@@ -215,10 +293,10 @@ return prisma.note.findMany({
 - Разрешать `PATCH` менять foreign keys, автора или создателя.
 - Создавать один service вручную внутри другого вместо Nest dependency injection.
 - Проверять роль только в controller, а затем вызывать service из другого места без проверки.
-- Тестировать только успешный сценарий ADMIN.
-- Проверять в list-тесте лишь status `200`, не анализируя содержимое.
+- Проверять policy только на успешном сценарии LEAD.
+- Считать status `200` достаточным и не анализировать содержимое list.
 
-## 10. Как подойти к незнакомому проекту
+## 11. Как подойти к незнакомому проекту
 
 Перед реализацией полезно пройти короткий маршрут:
 
@@ -228,7 +306,6 @@ return prisma.note.findMany({
 4. Проверить, откуда берутся parent IDs при create и update.
 5. Посмотреть seed: действительно ли в нём есть каждая роль и outsider.
 6. Согласовать матрицу и `403/404` до изменения кода.
-7. Сначала написать несколько ключевых e2e-сценариев, затем общий policy.
-8. После реализации пройти каждый endpoint из списка и убедиться, что он не пропущен.
+7. После реализации пройти каждый endpoint из списка и убедиться, что он не пропущен.
 
 Главная мысль: RBAC — это не один guard, а одинаковая политика на всех путях чтения и изменения данных.

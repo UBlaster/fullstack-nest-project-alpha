@@ -3,9 +3,8 @@
 > [!summary] Результат
 > Workspace, projects и documents защищены единой матрицей ролей, outsider не видит чужие данные, а различие `403/404` работает одинаково во всех endpoints.
 
-## Уровень и формат
-
-Задача для junior backend-разработчика. Матрица прав, HTTP-политика, структура API и форма общего механизма доступа уже зафиксированы ниже. Задачу нужно выполнять последовательно по этапам.
+> [!note] Связанный материал
+> См. [памятку к задаче 2](../guides/02-rbac-and-data-isolation-primer.md).
 
 ## Зачем нужна эта задача
 
@@ -16,42 +15,31 @@
 - при создании проекта выбирается первый workspace пользователя, хотя пользователь может состоять в нескольких;
 - API workspace пока отсутствует;
 - seed не содержит настоящего outsider: сейчас каждый seed-пользователь состоит в каждом workspace;
-- нет тестов, доказывающих изоляцию данных между workspace.
+- изоляция данных между workspace не гарантируется единым механизмом.
 
 Цель задачи — сделать один понятный механизм проверки доступа и применить его ко всем операциям с workspace, project и document.
-
-## Термины
-
-- **Аутентификация** отвечает на вопрос «кто отправил запрос?». В проекте это уже делает JWT guard.
-- **Membership** — запись `WorkspaceMember`, связывающая пользователя с workspace.
-- **RBAC** отвечает на вопрос «разрешено ли роли пользователя выполнить это действие?».
-- **Изоляция данных** означает, что участник одного workspace не видит ресурсы другого workspace ни в списках, ни по известному ID.
-- `createdById` проекта и `authorId` документа в этой задаче являются данными аудита. Они не дают дополнительных прав владельцу записи.
-- **Policy** — один service с правилами доступа. Он отвечает «можно ли выполнить действие», но сам не обновляет project/document.
-- **Relation path** — цепочка связей до workspace. Для document это `Document -> Project -> WorkspaceMember`.
-- **Outsider** — аутентифицированный пользователь, который не состоит в проверяемом workspace.
 
 ## Зафиксированная матрица прав
 
 Роль пользователя берётся из `WorkspaceMember.role` того workspace, которому принадлежит ресурс.
 
-| Ресурс и действие | OWNER | ADMIN | MEMBER | VIEWER |
-| --- | :---: | :---: | :---: | :---: |
-| Создать новый workspace¹ | ✅ | ✅ | ✅ | ✅ |
-| Просмотреть workspace | ✅ | ✅ | ✅ | ✅ |
-| Изменить workspace | ✅ | ✅ | ❌ | ❌ |
-| Архивировать workspace | ✅ | ❌ | ❌ | ❌ |
-| Удалить workspace | ✅ | ❌ | ❌ | ❌ |
-| Просмотреть project | ✅ | ✅ | ✅ | ✅ |
-| Создать project | ✅ | ✅ | ✅ | ❌ |
-| Изменить project | ✅ | ✅ | ✅ | ❌ |
-| Архивировать project | ✅ | ✅ | ✅ | ❌ |
-| Удалить project | ✅ | ✅ | ❌ | ❌ |
-| Просмотреть document | ✅ | ✅ | ✅ | ✅ |
-| Создать document | ✅ | ✅ | ✅ | ❌ |
-| Изменить document | ✅ | ✅ | ✅ | ❌ |
-| Архивировать document | ✅ | ✅ | ✅ | ❌ |
-| Удалить document | ✅ | ✅ | ❌ | ❌ |
+| Ресурс и действие        | OWNER | ADMIN | MEMBER | VIEWER |
+| ------------------------ | :---: | :---: | :----: | :----: |
+| Создать новый workspace¹ |  ✅   |  ✅   |   ✅   |   ✅   |
+| Просмотреть workspace    |  ✅   |  ✅   |   ✅   |   ✅   |
+| Изменить workspace       |  ✅   |  ✅   |   ❌   |   ❌   |
+| Архивировать workspace   |  ✅   |  ❌   |   ❌   |   ❌   |
+| Удалить workspace        |  ✅   |  ❌   |   ❌   |   ❌   |
+| Просмотреть project      |  ✅   |  ✅   |   ✅   |   ✅   |
+| Создать project          |  ✅   |  ✅   |   ✅   |   ❌   |
+| Изменить project         |  ✅   |  ✅   |   ✅   |   ❌   |
+| Архивировать project     |  ✅   |  ✅   |   ✅   |   ❌   |
+| Удалить project          |  ✅   |  ✅   |   ❌   |   ❌   |
+| Просмотреть document     |  ✅   |  ✅   |   ✅   |   ✅   |
+| Создать document         |  ✅   |  ✅   |   ✅   |   ❌   |
+| Изменить document        |  ✅   |  ✅   |   ✅   |   ❌   |
+| Архивировать document    |  ✅   |  ✅   |   ✅   |   ❌   |
+| Удалить document         |  ✅   |  ✅   |   ❌   |   ❌   |
 
 ¹ Роль в существующем workspace для этого действия не используется. Создать новый workspace может также аутентифицированный пользователь без единого membership.
 
@@ -142,7 +130,6 @@ backend/src/access/permissions.ts
 backend/src/workspaces/...
 backend/src/projects/...
 backend/src/documents/...
-backend/test/rbac.e2e-spec.ts
 ```
 
 ## Опорный код policy
@@ -162,106 +149,26 @@ const projectPermissions: Record<AccessAction, WorkspaceRole[]> = {
 };
 ```
 
-Пример проверки project с правильным порядком `ресурс -> membership -> роль`:
+Проверка project должна соблюдать порядок `ресурс -> membership -> роль`. Реализуйте методы без готового кода из task:
 
 ```ts
-async requireProject(userId: string, projectId: string, action: AccessAction) {
-	const project = await this.prisma.project.findUnique({ where: { id: projectId } });
-	if (!project) throw new NotFoundException();
-
-	const membership = await this.prisma.workspaceMember.findUnique({
-		where: {
-			userId_workspaceId: { userId, workspaceId: project.workspaceId },
-		},
-	});
-	if (!membership) throw new NotFoundException();
-	if (!projectPermissions[action].includes(membership.role)) {
-		throw new ForbiddenException();
-	}
-
-	return { project, membership };
+export class AccessPolicyService {
+	// requireWorkspace(userId, workspaceId, action)
+	// requireProject(userId, projectId, action)
+	// requireDocument(userId, documentId, action)
+	// Во всех методах применить единую политику 404/403.
 }
 ```
 
-Document загружайте с relation, нужным для workspace check:
+Document загружайте вместе с relation, нужным для workspace check:
 
-```ts
-const document = await this.prisma.document.findUnique({
-	where: { id: documentId },
-	include: { project: { select: { workspaceId: true } } },
-});
+```text
+Document -> Project -> workspaceId -> WorkspaceMember
 ```
 
 Create собирайте явно: `{ title: dto.title, content: dto.content, projectId, authorId: userId }`. `projectId` и `authorId` из body не принимать.
 
-## План выполнения
-
-### Этап 1. Подготовить модель и тестовые данные
-
-- Добавить статус workspace и migration.
-- Не переименовывать `OWNER`, `ADMIN`, `MEMBER`, `VIEWER`.
-- Обновить seed так, чтобы были пользователи всех четырёх ролей в одном workspace и отдельный outsider, не состоящий в нём.
-- Сохранить seed детерминированным и идемпотентным.
-
-Результат этапа: по seed-данным можно однозначно выбрать токен каждой роли и outsider.
-
-### Этап 2. Реализовать `AccessPolicyService`
-
-- Описать действия типом или enum, например view/create/update/archive/delete.
-- Перенести в общий компонент поиск membership и проверку роли.
-- Реализовать единый порядок `resource -> membership -> permission`, соответствующий политике `404/403`.
-- Зарегистрировать сервис через Nest DI и использовать его из workspace, project и document services.
-
-Результат этапа: правило доступа меняется в одном месте.
-
-### Этап 3. Применить проверки ко всем ресурсам
-
-- Добавить workspace controller/service.
-- Исправить создание project: workspace должен приходить из URL, а не выбираться через `findFirst`.
-- Применить policy ко всем list/get/create/update/delete операциям.
-- Не принимать `workspaceId`, `projectId`, `createdById` и `authorId` из произвольного body там, где эти значения должны определяться URL или текущим пользователем.
-
-Результат этапа: невозможно прочитать или изменить чужой ресурс, даже зная его ID.
-
-### Этап 4. Добавить e2e-тесты
-
-Проверки должны идти через HTTP и реальный Nest application. Повторяющиеся проверки матрицы нужно оформить параметризованными тестами через `it.each`.
-
-Для каждого ресурса проверить:
-
-- разрешённые действия каждой роли согласно матрице;
-- `403` для участника с недостаточной ролью;
-- `404` для outsider при запросе по ID;
-- `404` при обращении к document через неправильный project;
-- отсутствие чужих ID в list-ответах;
-- `401` без токена;
-- создание workspace назначает создателю `OWNER`;
-- создание project/document записывает корректные workspace/project и автора;
-- изменение body не позволяет подменить relation или автора.
-
-Не ограничивайтесь проверкой status code: для успешных запросов проверьте важные поля ответа и фактическую запись в БД.
-
-```ts
-it.each([
-	['owner@example.com', 200],
-	['admin@example.com', 200],
-	['member@example.com', 200],
-	['viewer@example.com', 403],
-])('PATCH project as %s -> %s', async (email, expectedStatus) => {
-	const token = await login(email);
-	await request(app.getHttpServer())
-		.patch(`/projects/${projectId}`)
-		.set('Authorization', `Bearer ${token}`)
-		.send({ name: 'Renamed project' })
-		.expect(expectedStatus);
-});
-```
-
-### Этап 5. Документация и проверка
-
-- Создать отдельный документ `docs/api/rbac.md` и описать в нём матрицу ролей и политику `401/403/404`. README в рамках этой задачи не изменять.
-- Выполнить format check, lint, build и e2e-тесты backend.
-- Убедиться, что существующий frontend продолжает работать через сохранённые `GET /projects`, `GET /projects/:projectId`, `GET /documents/:documentId` и document endpoints.
+Создать отдельный документ `docs/api/rbac.md` и описать в нём матрицу ролей и политику `401/403/404`. README в рамках этой задачи не изменять. Существующий frontend должен продолжить работать через сохранённые `GET /projects`, `GET /projects/:projectId`, `GET /documents/:documentId` и document endpoints.
 
 ## Что не входит в задачу
 
@@ -281,17 +188,6 @@ it.each([
 - Project проверяется через workspace, document — через project и workspace.
 - Outsider получает `404` и не видит чужие ресурсы в списках.
 - Участник workspace с недостаточными правами получает `403`.
-- Есть e2e-тесты разрешённых и запрещённых действий для всех ролей.
 - Нет создания `ProjectsService`/`DocumentsService` вручную через `new`.
 - Prisma schema, migration, seed и документация обновлены.
-- Backend проходит format check, lint, build и e2e-тесты.
-
-## Вопросы для code review
-
-После выполнения разработчик должен уметь ответить на вопросы:
-
-1. Почему outsider получает `404`, а `VIEWER` при попытке изменения — `403`?
-2. Где находится единственный источник прав ролей?
-3. Как код доказывает принадлежность document нужному workspace?
-4. Почему нельзя доверять `workspaceId`, `projectId` или `authorId` из body?
-5. Какой тест гарантирует, что list endpoint не раскрывает чужие данные?
+- Backend проходит format check, lint и build.

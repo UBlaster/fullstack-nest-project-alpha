@@ -3,6 +3,20 @@
 > [!tip] В двух словах
 > **Снижение ущерба.** Если база утечёт, хеши усложнят восстановление паролей; DTO и модули не дадут случайным данным расползтись по системе.
 
+## Контекст учебного примера
+
+В примере сервис подписок создаёт `CustomerAccount`, а модуль каталога управляет `CatalogItem`. Названия намеренно отличаются от Workspace Docs; переиспользуется сам подход NestJS -> DTO -> service -> Prisma.
+
+## Ключевые термины
+
+- **Hash пароля** — необратимое представление пароля, с которым bcrypt сравнивает введённое значение.
+- **Salt** — случайная добавка, из-за которой одинаковые пароли получают разные hashes.
+- **Cost/rounds** — параметр bcrypt, определяющий вычислительную стоимость одного hash.
+- **Runtime validation** — проверка данных во время работы приложения, когда TypeScript-типы уже недоступны.
+- **Dependency Injection** — механизм NestJS, который создаёт service и передаёт его зависимым классам.
+- **Seed** — повторяемое заполнение БД начальными учебными данными.
+- **Telemetry** — технические logs, traces и metrics, используемые для диагностики работы приложения.
+
 ## Почему пароль не шифруют
 
 Шифрование можно расшифровать ключом. Для проверки пароля исходное значение не нужно, поэтому хранится медленный salted hash. При входе библиотека извлекает параметры из hash и проверяет кандидат.
@@ -21,6 +35,12 @@ login:        candidate + stored hash -> bcrypt.compare -> true/false
 ## DTO — граница доверия
 
 Клиент контролирует JSON. TypeScript type исчезает во время выполнения, а DTO с class-validator реально проверяет значение.
+
+> [!note] Аналогия для frontend
+>
+> - **React:** DTO похож на Zod-схему, подключённую к React Hook Form: данные проверяются до передачи в business logic.
+> - **Vue:** DTO похож на Zod-схему, подключённую к VeeValidate: компонент не доверяет произвольному объекту формы.
+> - **Backend:** проверка обязательна повторно, потому что HTTP-клиент может полностью обойти frontend.
 
 ```ts
 class CreateProfileDto {
@@ -43,27 +63,54 @@ data: { displayName: dto.displayName, ownerId: currentUserId }
 Controller отвечает за HTTP, service — за сценарий, PrismaService — за доступ к БД. Когда login, project CRUD и DTO лежат в одном файле, изменение одной функции затрагивает слишком большой контекст.
 
 ```text
-AuthController -> AuthService -> PrismaService
-ProjectController -> ProjectService -> PrismaService
+AccountController -> AccountService -> PrismaService
+CatalogController -> CatalogService -> PrismaService
 ```
 
 Отдельный repository полезен не всегда. Если он лишь повторяет методы Prisma без собственной семантики, появляется лишний слой без пользы.
 
-## Что обычно тестируют
-
-- в БД нет исходного пароля;
-- неизвестный пользователь и неверный пароль выглядят одинаково;
-- extra fields не меняют служебные колонки;
-- ошибочный DTO даёт `400` до вызова business operation;
-- seed создаёт такие же hashes, как обычная регистрация.
-
 ## Переиспользуемый рецепт NestJS
 
-Спрячьте bcrypt за маленьким service: tests смогут подменить его, а параметры не размазываются по auth-коду.
+Входной DTO существует в runtime и проверяет оба пароля:
+
+```ts
+export class SignUpDto {
+	@IsEmail()
+	email!: string;
+
+	@IsString()
+	@Length(2, 80)
+	displayName!: string;
+
+	@IsString()
+	@Length(8, 72)
+	password!: string;
+
+	@IsString()
+	passwordConfirmation!: string;
+}
+```
+
+DTO другой feature не принимает owner/service fields:
+
+```ts
+export class CreateCatalogItemDto {
+	@IsString()
+	@Length(1, 120)
+	label!: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(1000)
+	details?: string;
+}
+```
+
+Спрячьте bcrypt за маленьким service: реализацию можно заменить отдельно, а параметры не размазываются по auth-коду.
 
 ```ts
 @Injectable()
-export class PasswordService {
+export class CredentialService {
 	private readonly rounds = Number(process.env.BCRYPT_ROUNDS ?? 12);
 
 	hash(password: string): Promise<string> {
@@ -79,33 +126,20 @@ export class PasswordService {
 Registration явно формирует DB input:
 
 ```ts
-async register(dto: RegisterDto) {
+async signUp(dto: SignUpDto) {
 	if (dto.password !== dto.passwordConfirmation) {
 		throw new BadRequestException('Passwords do not match');
 	}
 
-	return this.prisma.user.create({
+	return this.prisma.customerAccount.create({
 		data: {
-			email: dto.email.trim().toLowerCase(),
-			name: dto.name.trim(),
-			password: await this.passwords.hash(dto.password),
+			loginEmail: dto.email.trim().toLowerCase(),
+			displayName: dto.displayName.trim(),
+			credentialHash: await this.credentials.hash(dto.password),
 		},
-		select: { id: true, email: true, name: true },
+		select: { id: true, loginEmail: true, displayName: true },
 	});
 }
-```
-
-E2E проверяет не только response, но и сохранённое значение:
-
-```ts
-const response = await request(app.getHttpServer())
-	.post('/auth/register')
-	.send({ email, name: 'Test', password, passwordConfirmation: password })
-	.expect(201);
-
-const stored = await prisma.user.findUniqueOrThrow({ where: { id: response.body.id } });
-expect(stored.password).not.toBe(password);
-expect(await bcrypt.compare(password, stored.password)).toBe(true);
 ```
 
 ## Частые ошибки

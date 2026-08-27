@@ -3,17 +3,16 @@
 > [!summary] Результат
 > Основные read-запросы измерены, N+1 устранён, а документы ищутся по title через быстрый permission-aware trigram search.
 
+> [!note] Связанный материал
+> См. [памятку к задаче 3](../guides/03-sql-indexes-n-plus-one-and-trigram-search-primer.md).
+
+## Проблема
+
+В Workspace Docs нет поиска документов с опечатками, а скорость существующих read-сценариев не подтверждена измерениями. Prisma скрывает фактическое число SQL-запросов, поэтому лишние запросы в циклах и бесполезные индексы могут остаться незамеченными на маленьком seed-наборе.
+
 ## Предусловие
 
 Задача выполняется после задачи №2: `AccessPolicyService` и workspace isolation уже работают.
-
-## Новые термины
-
-- **N+1** — один запрос получает список из N строк, после чего код делает ещё по запросу на каждую строку.
-- **Индекс** — дополнительная структура PostgreSQL для быстрого поиска. Она ускоряет подходящие чтения, но занимает место и замедляет запись.
-- **`EXPLAIN ANALYZE`** — команда PostgreSQL, которая реально выполняет SQL и показывает план, время, число строк и чтение buffers.
-- **Trigram** — тройка соседних символов. `pg_trgm` сравнивает наборы таких троек и поэтому находит близкие строки с опечатками.
-- **Ranking** — порядок результатов по релевантности.
 
 ## Зафиксированный контракт поиска
 
@@ -43,50 +42,33 @@
 - `backend/prisma/schema.prisma`: обычные модели; operator class индекса будет в migration SQL.
 - `backend/src/documents/`: search DTO, controller method и service query.
 - `backend/prisma/seed.ts`: обычный seed не раздувать; создать отдельный performance script для 10 000+ documents.
-- `backend/test/documents-search.e2e-spec.ts`: контракт и isolation.
 - `docs/performance/03-query-analysis.md`: планы до/после.
 
 Текущий `ProjectsService.get()` уже получает documents одним relation include; это не N+1 само по себе. Сначала включите Prisma query logging/test counter и посчитайте SQL.
 
 ## Опорные SQL и NestJS-примеры
 
-Migration:
+Migration должна включить extension и создать trigram index. Конкретный SQL разработчик составляет по памятке №3:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
-
-CREATE INDEX "Document_title_trgm_idx"
-ON "Document"
-USING GIN ("title" gin_trgm_ops);
+-- Создать GIN trigram index для Document.title.
 ```
 
-До и после индекса запускайте один запрос:
+До и после индекса запускайте один и тот же permission-aware запрос:
 
 ```sql
 EXPLAIN (ANALYZE, BUFFERS)
-SELECT d."id", d."title", similarity(d."title", 'api architecture') AS score
-FROM "Document" d
-JOIN "Project" p ON p."id" = d."projectId"
-WHERE p."workspaceId" = 'seed-workspace-1'
-  AND d."title" % 'api architecture'
-ORDER BY score DESC, d."updatedAt" DESC, d."id" ASC
-LIMIT 20 OFFSET 0;
+-- SELECT Document с JOIN Project, workspace filter, similarity ranking и LIMIT.
 ```
 
-В Prisma используйте tagged template, а не строковую склейку:
+В Prisma используйте параметризованный tagged template, а не строковую склейку:
 
 ```ts
-return this.prisma.$queryRaw<SearchDocumentRow[]>`
-	SELECT d."id", d."projectId", d."title", d."status", d."updatedAt",
-	       u."name" AS "authorName", similarity(d."title", ${query}) AS score
-	FROM "Document" d
-	JOIN "Project" p ON p."id" = d."projectId"
-	JOIN "User" u ON u."id" = d."authorId"
-	WHERE p."workspaceId" = ${workspaceId}
-	  AND d."title" % ${query}
-	ORDER BY score DESC, d."updatedAt" DESC, d."id" ASC
-	LIMIT ${limit} OFFSET ${offset}
-`;
+export class DocumentsSearchService {
+	// search(userId, workspaceId, dto): проверить доступ,
+	// выполнить параметризованный trigram SQL и вернуть безопасные поля.
+}
 ```
 
 Workspace filter находится внутри SQL до `LIMIT`: это часть защиты данных, а не косметический filter результата.
@@ -114,18 +96,6 @@ Workspace filter находится внутри SQL до `LIMIT`: это час
 - какой N+1 найден и сколько запросов стало после исправления;
 - ограничения результата. Один локальный замер не объявлять production SLA.
 
-## Тесты
-
-- точное и частичное совпадение title;
-- ranking более похожего title выше менее похожего;
-- регистронезависимость и стабильный tie-break;
-- пустой/короткий/слишком длинный query — `400`;
-- limit/offset defaults и границы;
-- response не содержит content;
-- документы другого workspace отсутствуют;
-- outsider получает `404`, все четыре роли с view permission — `200`;
-- специальные символы не ломают SQL и не создают injection.
-
 ## Не входит в задачу
 
 Поиск по content, Elasticsearch/OpenSearch, semantic search, Redis cache и изменение RBAC.
@@ -136,4 +106,4 @@ Workspace filter находится внутри SQL до `LIMIT`: это час
 - Search контракт и permission rules соблюдаются.
 - Нет запросов к БД внутри цикла в исследованных сценариях.
 - В репозитории есть воспроизводимый EXPLAIN-отчёт.
-- Backend проверки и e2e-тесты проходят в Docker Compose.
+- Backend проходит format check, lint и build в Docker Compose.

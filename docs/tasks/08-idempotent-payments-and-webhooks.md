@@ -3,31 +3,31 @@
 > [!summary] Результат
 > Тестовый платёж создаётся один раз при повторах/конкуренции, webhook проверяется и дедуплицируется, а сбой после внешнего успеха восстанавливается reconciliation job.
 
+> [!note] Связанный материал
+> См. [памятку к задаче 8](../guides/08-payment-idempotency-concurrency-and-webhooks-primer.md).
+
+## Проблема
+
+Повторный POST, параллельные клики и повторная доставка webhook могут создать несколько логических платежей или откатить уже завершённый статус. Timeout provider оставляет неизвестный результат: автоматическое повторное списание или немедленный `FAILED` одинаково опасны.
+
+## Предусловия
+
+Задачи №2 и №6 завершены. Используйте готовые `AccessPolicyService`, BullMQ connection/worker и общий механизм retries; не создавайте второй access или queue layer внутри payments.
+
 ## Границы и provider
 
 Интеграция учебная: реальные деньги и карточные данные не используются. Создать `PaymentProvider` и `FakePaymentProvider`, работающий как отдельный сервис в Docker Compose. Backend знает только provider customer/payment IDs и статус.
 
-## Новые термины и связь с Workspace Docs
+## Связь с Workspace Docs
 
-- **Idempotency** — повтор одной команды приводит к тому же результату, а не ко второму списанию.
-- **Concurrency** — два запроса выполняются одновременно и могут прочитать одно старое состояние.
-- **Webhook** — входящий HTTP request от provider о событии платежа.
-- **Reconciliation** — периодическая сверка локального статуса со статусом provider после неизвестного результата.
-- **State machine** — фиксированный список статусов и разрешённых переходов между ними.
+Payment привязан к `Workspace`, потому что оплачивается функция workspace, и к `User`, который начал операцию. Добавьте `backend/src/payments/`, fake-provider service в Compose и migration. Не добавляйте поля карты в Prisma schema.
 
-Payment привязан к `Workspace`, потому что оплачивается функция workspace, и к `User`, который начал операцию. Добавьте `backend/src/payments/`, fake-provider service в Compose, migration и e2e-файл. Не добавляйте поля карты в Prisma schema.
-
-Provider закрывается интерфейсом, чтобы тест не ходил в реальную сеть:
+Provider закрывается интерфейсом, чтобы backend не зависел от деталей fake provider:
 
 ```ts
 export interface PaymentProvider {
-	createPayment(input: {
-		idempotencyKey: string;
-		amountMinor: number;
-		currency: 'RUB';
-	}): Promise<{ providerPaymentId: string; status: ProviderPaymentStatus }>;
-
-	getPayment(providerPaymentId: string): Promise<ProviderPayment>;
+	// createPayment(...)
+	// getPayment(...)
 }
 ```
 
@@ -40,6 +40,7 @@ model Payment {
   idempotencyKey String
   requestHash    String
 
+  // Добавить составную уникальность, защищающую повтор одного запроса.
   @@unique([userId, idempotencyKey])
 }
 ```
@@ -47,10 +48,9 @@ model Payment {
 Webhook signature проверяется по raw body до обработки JSON:
 
 ```ts
-const expected = createHmac('sha256', secret).update(rawBody).digest();
-const received = Buffer.from(signature, 'hex');
-if (expected.length !== received.length || !timingSafeEqual(expected, received)) {
-	throw new UnauthorizedException();
+export class PaymentWebhookService {
+	// verifySignature(rawBody, signature): HMAC-SHA256 + constant-time compare
+	// process(event): дедупликация event ID и вызов общего transition service
 }
 ```
 
@@ -98,31 +98,10 @@ terminal -> без переходов
 
 После provider success backend может упасть до update. Периодическая BullMQ job каждые 5 минут выбирает `CREATED/PENDING` старше 2 минут, запрашивает provider и применяет тот же transition handler. Ручной endpoint `POST /payments/:id/reconcile` доступен `OWNER/ADMIN`.
 
-## Порядок выполнения
-
-1. Зафиксировать Prisma models, constraints и state machine tests.
-2. Поднять fake provider и реализовать adapter contract.
-3. Реализовать один create request, затем idempotent repeat и parallel race.
-4. Добавить raw-body webhook signature и event deduplication.
-5. Подключить общий transition service и out-of-order tests.
-6. Добавить reconciliation job, audit/redaction и failure recovery e2e.
-
-## Тесты
-
-- первый и повторный request с одним key;
-- одинаковый key с другим body — `409`;
-- 10 параллельных запросов создают один Payment и один provider charge;
-- invalid/missing signature, duplicate webhook, out-of-order events;
-- provider success + падение backend восстанавливается reconciliation;
-- optimistic concurrency не допускает два перехода;
-- audit содержит переход, но не secret/card data;
-- outsider — `404`, MEMBER/VIEWER — `403`;
-- provider timeout даёт повторяемое состояние, а не второй charge.
-
 ## Конфигурация и документация
 
 Env: provider base URL, API key, webhook secret, timeouts; только placeholders в `.env.example`. Создать `docs/payments/08-idempotency-and-webhooks.md` со state machine, signature algorithm, retry/reconciliation runbook.
 
 ## Критерии приёмки
 
-Уникальные constraints и transitions находятся в migration/code, повторная доставка безопасна, восстановление проверено тестом, Docker использует только fake provider. Платёжные secrets и raw sensitive payload не логируются.
+Уникальные constraints и transitions находятся в migration/code, повторная доставка безопасна, неизвестное состояние восстанавливается через reconciliation, Docker использует только fake provider. Платёжные secrets и raw sensitive payload не логируются.

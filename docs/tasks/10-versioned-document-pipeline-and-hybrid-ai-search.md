@@ -3,22 +3,22 @@
 > [!summary] Результат
 > Загруженный документ обрабатывается повторяемым versioned pipeline, chunks индексируются в PostgreSQL/pgvector, а permission-aware поиск объединяет trigram и Voyage AI semantic ranking.
 
+> [!note] Связанный материал
+> См. [памятку к задаче 10](../guides/10-document-pipelines-embeddings-and-hybrid-search-primer.md).
+
+## Проблема
+
+Новая загрузка документа не имеет повторяемого versioned pipeline: сбой извлечения или Voyage AI может оставить частичный результат и повредить текущую доступную версию. Поиск из задачи №3 учитывает title и опечатки, но не находит перефразированную мысль внутри document content.
+
 ## Предусловия и фиксированный стек
 
 Задачи №2–7 и №9 завершены. Использовать BullMQ, MinIO/S3, PostgreSQL 16, расширение `vector`, Prisma migrations, Voyage AI HTTP API. Название embedding model задаётся `VOYAGE_EMBEDDING_MODEL`; dimension задаётся `EMBEDDING_DIMENSION` и проверяется при старте.
 
-Векторное хранилище — PostgreSQL pgvector. Отдельную vector database не добавлять. Provider закрыт интерфейсом `EmbeddingProvider`, production adapter — `VoyageEmbeddingProvider`, tests — deterministic fake.
+Векторное хранилище — PostgreSQL pgvector. Отдельную vector database не добавлять. Provider закрыт интерфейсом `EmbeddingProvider`, production adapter — `VoyageEmbeddingProvider`, локальный adapter — deterministic fake.
 
 Обозначение `x3` из исходной Jira-постановки оставить буквальным placeholder в проектной документации до отдельного технического решения команды. Не превращать `x3` в env-переменную, коэффициент ranking, число workers, название модели или требование к Voyage AI: в коде у него пока нет определённого смысла.
 
-## Новые термины и модули
-
-- **Ingest** — приём исходного файла и создание версии обработки.
-- **Chunk** — небольшой фрагмент текста, который помещается в лимит embedding model.
-- **Embedding** — массив чисел, описывающий смысл текста; близкие векторы означают похожий смысл.
-- **Semantic search** ищет по смыслу, **lexical/trigram search** — по символам и словам.
-- **Hybrid search** объединяет оба списка.
-- **Dual-write** новой embedding version — временная запись старой и новой версии для безопасного переключения.
+## Модули и границы
 
 Используйте готовые модули предыдущих задач: file из `document-files`, BullMQ/outbox из `exports/queue`, policy из `access`, traces из `observability`. Новый код разместите в `backend/src/document-pipeline/`, `backend/src/embeddings/`, `backend/src/search/`; не создавайте второй queue/storage/access layer.
 
@@ -26,8 +26,8 @@ Provider contract:
 
 ```ts
 export interface EmbeddingProvider {
-	embedDocuments(texts: string[]): Promise<number[][]>;
-	embedQuery(text: string): Promise<number[]>;
+	// embedDocuments(...)
+	// embedQuery(...)
 }
 ```
 
@@ -36,7 +36,7 @@ Stage payload не содержит текст:
 ```ts
 type PipelineJob = {
 	documentVersionId: string;
-	stage: 'EXTRACT' | 'NORMALIZE' | 'CHUNK' | 'EMBED' | 'INDEX';
+	stage: PipelineStage;
 	inputHash: string;
 	traceparent?: string;
 };
@@ -48,9 +48,8 @@ Worker загружает input по ID, проверяет prerequisite и пы
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
-ALTER TABLE "DocumentEmbedding" ADD COLUMN "vector" vector(1024) NOT NULL;
-CREATE INDEX "DocumentEmbedding_vector_hnsw_idx"
-ON "DocumentEmbedding" USING hnsw ("vector" vector_cosine_ops);
+-- Добавить vector column зафиксированной dimension.
+-- Добавить HNSW cosine index для semantic retrieval.
 ```
 
 Если выбранная Voyage model имеет другую dimension, SQL и `EMBEDDING_DIMENSION` должны быть изменены одной подготовленной migration/release.
@@ -111,29 +110,6 @@ Permission filter должен находиться в обоих SQL retrieval 
 5. Сохранить предыдущую version для rollback один release cycle.
 6. Очистить старые embeddings отдельной повторяемой job.
 
-## Порядок выполнения
-
-1. Добавить version/stage/chunk models и fake embedding provider.
-2. Реализовать ingest и последовательный pipeline на одном маленьком text fixture.
-3. Добавить idempotency, duplicate/out-of-order/recovery и большой stream input.
-4. Включить pgvector и semantic retrieval с permission filter.
-5. Объединить готовый trigram search задачи №3 через RRF.
-6. Подключить opt-in Voyage adapter с rate limits/cost metrics.
-7. Провести учебную смену embedding version через dual-write/backfill/switch/rollback.
-
-## Тесты
-
-- duplicate upload/content создаёт одну logical version;
-- два worker не выполняют одну stage одновременно;
-- retry, crash recovery, duplicate/out-of-order messages;
-- большой файл не загружается целиком в память;
-- provider 429 соблюдает retry/backoff, partial batch безопасно продолжается;
-- current version меняется только после полного index;
-- hybrid ranking детерминирован с fake embeddings;
-- outsider/chужой workspace отсутствует до LIMIT;
-- migration embedding version: dual-write, backfill, switch, rollback;
-- trace проходит через все stages.
-
 ## Документация и критерии приёмки
 
-Создать `docs/ai/10-document-pipeline-and-hybrid-search.md`: state diagram, schemas, idempotency keys, chunking, rate limits, recovery, model migration и cost controls. Реальный Voyage key не коммитить. Pipeline воспроизводим в Docker с fake provider; отдельный opt-in integration test проверяет Voyage adapter.
+Создать `docs/ai/10-document-pipeline-and-hybrid-search.md`: state diagram, schemas, idempotency keys, chunking, rate limits, recovery, model migration и cost controls. Реальный Voyage key не коммитить. Pipeline воспроизводим в Docker с fake provider, а Voyage adapter включается только явно через конфигурацию.

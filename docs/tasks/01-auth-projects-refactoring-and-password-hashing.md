@@ -1,7 +1,10 @@
 # Задача 1. Рефакторинг auth/projects и безопасные пароли
 
 > [!summary] Результат
-> Auth и projects разделены на понятные NestJS-модули, вход и регистрация используют хеши паролей, входные данные проходят DTO-валидацию, а поведение подтверждено e2e-тестами.
+> Auth и projects разделены на понятные NestJS-модули, вход и регистрация используют хеши паролей, а входные данные проходят DTO-валидацию.
+
+> [!note] Связанный материал
+> См. [памятку к задаче 1](../guides/01-password-hashing-dto-and-module-boundaries-primer.md).
 
 ## Исходное состояние
 
@@ -10,15 +13,6 @@
 - В project endpoints используется `any`.
 - При создании проекта workspace выбирается через первый найденный membership.
 - Глобальный `ValidationPipe` уже включён.
-
-## Сначала разберитесь с терминами
-
-- **DTO (Data Transfer Object)** — класс, описывающий допустимое тело HTTP-запроса. В отличие от TypeScript interface, DTO существует во время работы приложения, поэтому `class-validator` может вернуть `400` до входа в service.
-- **Hash пароля** — необратимый результат медленной функции. Мы не расшифровываем его, а вызываем `bcrypt.compare(candidate, storedHash)`.
-- **Dependency Injection (DI)** — Nest сам создаёт service и передаёт его в constructor. Поэтому в коде не должно быть `new AuthService(...)`.
-- **E2E-тест** — тест, который поднимает настоящий Nest application и вызывает endpoint через HTTP (`supertest`).
-
-Эти определения используются в следующих задачах без повторного объяснения.
 
 ## Какие файлы должны получиться
 
@@ -41,46 +35,29 @@ backend/src/projects/dto/update-project.dto.ts
 
 ## Опорная реализация
 
-DTO проекта должен быть настоящим классом:
+DTO проекта должен быть настоящим классом. Реализуйте validators согласно разделу «Требования к DTO»:
 
 ```ts
 export class CreateProjectDto {
-	@IsString()
-	@Length(1, 120)
-	name!: string;
-
-	@IsOptional()
-	@IsString()
-	@MaxLength(2000)
-	description?: string;
+	// name: обязательная строка с установленными границами длины
+	// description: необязательная строка с максимальной длиной
 }
 ```
 
-В `RegisterDto` проверяйте confirmation отдельным validator или явно в service. В Prisma передавайте только разрешённые поля:
+В `RegisterDto` проверяйте confirmation, а в Prisma передавайте только разрешённые поля. Подробный пример находится в памятке №1.
 
 ```ts
-const passwordHash = await bcrypt.hash(dto.password, this.hashRounds);
-
-const user = await this.prisma.user.create({
-	data: {
-		email: dto.email.toLowerCase(),
-		name: dto.name,
-		password: passwordHash,
-	},
-	select: { id: true, email: true, name: true },
-});
+export class AuthService {
+	// register(): проверить confirmation, нормализовать email,
+	// захешировать пароль и сохранить только разрешённые поля
+	// login(): сравнить пароль через bcrypt и выдать JWT
+}
 ```
 
-`passwordConfirmation` здесь намеренно отсутствует. Login меняется с текущего `user.password !== dto.password` на:
+`passwordConfirmation` не должно попадать в Prisma `data`. Текущее прямое сравнение пароля необходимо заменить вызовом bcrypt:
 
 ```ts
-const passwordMatches = user
-	? await bcrypt.compare(dto.password, user.password)
-	: false;
-
-if (!user || !passwordMatches) {
-	throw new UnauthorizedException('Invalid credentials');
-}
+const passwordMatches = await bcrypt.compare(/* введённый пароль */, /* hash из БД */);
 ```
 
 Workspace при создании project берётся из URL:
@@ -92,7 +69,7 @@ create(
 	@Body() dto: CreateProjectDto,
 	@Req() request: AuthenticatedRequest,
 ) {
-	return this.projectsService.create(request.user.sub, workspaceId, dto);
+	// Передать userId, workspaceId и валидированный DTO в service.
 }
 ```
 
@@ -117,38 +94,13 @@ create(
 - `UpdateProjectDto`: те же изменяемые поля, но optional; пустой body получает `400`.
 - Поля `workspaceId`, `createdById`, `status`, timestamps и неизвестные поля не должны попадать в Prisma `data`.
 
-## Порядок реализации
-
-1. Разнести auth и projects по отдельным NestJS-модулям и подключить их в `AppModule`.
-2. Добавить bcrypt и env-переменную в `.env.example`/Compose.
-3. При регистрации проверить уникальность email, захешировать пароль и явно собрать Prisma `data`.
-4. При login сначала найти пользователя, затем выполнить `bcrypt.compare`. Для неизвестного email и неверного пароля вернуть одинаковый `401 Invalid credentials`.
-5. Обновить seed: хешировать `password123`; повторный seed остаётся идемпотентным.
-6. Заменить `any` в project controller/service на DTO и тип пользователя request.
-7. Исправить создание project: использовать `workspaceId` URL после проверки membership.
-8. Реализовать удаление текущего аккаунта с проверкой пароля и описанным `409`.
-
-После каждого шага запускайте соответствующий узкий тест. Не переносите весь файл и только затем пытайтесь исправить десятки ошибок.
-
 > [!warning] Миграции
 > Поле `User.password` уже имеет тип `String`, подходящий для bcrypt hash. Если Prisma schema не меняется, пустую migration создавать нельзя. Опубликованные migrations не редактировать.
-
-## Тесты
-
-- регистрация создаёт пользователя и не хранит исходный пароль;
-- `passwordConfirmation` не попадает в БД;
-- duplicate email — `409`, невалидные DTO — `400`;
-- login работает для нового пользователя и всех seed-пользователей с `password123`;
-- неизвестный email и неверный пароль дают одинаковый `401`;
-- удаление с неверным паролем — `401`, с зависимыми audit-записями — `409`, допустимое удаление — `204`;
-- create/update/delete project используют валидные DTO и явный workspace;
-- пользователь без membership не создаёт project;
-- существующие auth e2e-сценарии продолжают проходить.
 
 ## Документация и проверка
 
 - Создать `docs/api/01-auth-and-projects.md`: endpoints, DTO, коды ошибок и env.
-- Выполнить `format:check`, `lint`, `build`, `test:e2e`.
+- Выполнить `format:check`, `lint` и `build`.
 - Проверить seed и login в Docker Compose.
 
 ## Не входит в задачу
@@ -161,4 +113,5 @@ Refresh tokens, восстановление пароля, email verification, O
 - В БД и seed находятся bcrypt hashes, но demo-пароль остаётся `password123`.
 - Workspace проекта всегда задан URL и проверен.
 - DTO отсекают служебные и неизвестные поля.
-- Все перечисленные тесты и Docker-запуск проходят.
+- Регистрация, login, удаление аккаунта и project endpoints работают по зафиксированным HTTP-контрактам.
+- Backend запускается в Docker Compose.

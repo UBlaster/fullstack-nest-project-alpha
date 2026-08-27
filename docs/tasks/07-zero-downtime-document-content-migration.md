@@ -3,6 +3,9 @@
 > [!summary] Результат
 > Колонка документа переименована через expand -> dual-write -> backfill -> switch -> contract без окна, в котором старая или новая версия API несовместима со схемой.
 
+> [!note] Связанный материал
+> См. [памятку к задаче 7](../guides/07-zero-downtime-database-migrations-primer.md).
+
 ## Сценарий
 
 Нужно заменить legacy-поле `Document.content` новым полем `Document.body`. Прямой `RENAME COLUMN` запрещён: старая версия приложения после deploy schema перестанет работать.
@@ -13,17 +16,13 @@
 
 Сейчас `content` обязательно в `backend/prisma/schema.prisma`, создаётся в `DocumentsService.create`, обновляется в `DocumentsService.update`, выводится в `frontend/src/pages/document/ui/DocumentPage.tsx` и заполняется seed. Значит, dual-read/write нужно провести через все эти места, а не только через Prisma schema.
 
-- **Expand** — добавить новое, не удаляя старое.
-- **Backfill** — заполнить новое поле для уже существующих строк.
-- **Switch** — перевести чтение на новое поле.
-- **Contract** — удалить legacy только после rollback window.
-
 На фазе A Prisma schema временно содержит оба поля:
 
 ```prisma
 model Document {
   // остальные поля
   content String
+  // Новое nullable поле для expand-фазы.
   body    String?
 }
 ```
@@ -31,12 +30,10 @@ model Document {
 Service пишет оба значения:
 
 ```ts
-data: {
-	title: dto.title,
-	content: dto.content,
-	body: dto.content,
-	projectId,
-	authorId: userId,
+export class DocumentsService {
+	// Release A: писать content и body одной операцией.
+	// Release B: читать body с fallback на content.
+	// Release C: прекратить legacy write.
 }
 ```
 
@@ -87,21 +84,6 @@ Backfill удобно реализовать raw SQL batches с условием
 ## Проверка блокировок
 
 Для каждой DDL-команды записать ожидаемый lock, длительность на копии заполненной БД и `lock_timeout`. Если операция превышает 5 секунд или ждёт lock, migration должна прерваться, а не блокировать API.
-
-## Тестовая матрица совместимости
-
-- старая версия + schema до expand;
-- старая версия + expanded schema;
-- Release A/B + expanded/backfilled schema;
-- Release C + schema с legacy column;
-- Release D + contracted schema;
-- повторный backfill и остановка между batches;
-- create/update во время backfill не создаёт mismatch;
-- migrations применяются на чистой БД и копии с данными.
-
-## Порядок выполнения
-
-Выполняйте по одному release и фиксируйте результат: A expand/dual-write -> backfill rehearsal -> B switch reads -> наблюдение -> C stop legacy writes -> rollback window -> D contract. Нельзя заранее создать contract migration и применить её вместе с expand только потому, что локально запускается один container.
 
 ## Runbook
 

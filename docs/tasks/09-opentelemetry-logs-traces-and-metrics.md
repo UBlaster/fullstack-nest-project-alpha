@@ -3,6 +3,13 @@
 > [!summary] Результат
 > Один correlation ID связывает HTTP, Prisma, Redis, BullMQ worker, S3 и payment provider; traces видны в Jaeger, метрики — в Prometheus, логи структурированы и не содержат секретов.
 
+> [!note] Связанный материал
+> См. [памятку к задаче 9](../guides/09-observability-logs-traces-and-metrics-primer.md).
+
+## Проблема
+
+Сейчас один пользовательский сценарий нельзя проследить через HTTP, Prisma, Redis, BullMQ, S3 и payment provider. Разрозненные строки логов не показывают, где потрачено время, насколько массовая ошибка и продолжилась ли операция после перехода в worker.
+
 ## Зафиксированный локальный стек
 
 - OpenTelemetry Node SDK и OTLP exporter;
@@ -14,24 +21,14 @@
 
 Добавить сервисы в Compose с healthchecks. Если collector недоступен, приложение продолжает обслуживать запросы и не падает из-за telemetry export.
 
-## Новые термины и точки подключения
-
-- **Structured log** — JSON с именованными полями вместо свободной строки.
-- **Trace** — путь одной операции через компоненты; **span** — отдельный участок этого пути.
-- **Metric** — числовой временной ряд; **label cardinality** — число уникальных сочетаний labels.
-- **Correlation ID** — ID, который можно сообщить support и найти в logs.
-- **OpenTelemetry Collector** — отдельный process, принимающий telemetry от приложения и передающий её backend системам.
+## Точки подключения
 
 Добавьте `backend/src/observability/`, инициализируйте SDK в новом bootstrap-файле **до** import `AppModule`, иначе автоматические instrumentations загрузятся слишком поздно. HTTP middleware/interceptor создаёт request context; global exception filter записывает ошибку один раз.
 
 ```ts
-// backend/src/instrumentation.ts импортируется первой строкой main.ts/worker.ts
-const sdk = new NodeSDK({
-	traceExporter: new OTLPTraceExporter({ url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT }),
-	instrumentations: [getNodeAutoInstrumentations()],
-});
-
-void sdk.start();
+// backend/src/instrumentation.ts
+// Настроить NodeSDK, OTLP exporters и auto-instrumentations.
+// Импортировать этот файл до AppModule в main.ts и worker.ts.
 ```
 
 Request ID кладётся в `AsyncLocalStorage`, чтобы service не принимал его отдельным аргументом:
@@ -39,8 +36,9 @@ Request ID кладётся в `AsyncLocalStorage`, чтобы service не пр
 ```ts
 export type RequestContext = { requestId: string; userId?: string; workspaceId?: string };
 
-run<T>(context: RequestContext, callback: () => T): T {
-	return this.storage.run(context, callback);
+export class RequestContextService {
+	// run(context, callback)
+	// get(): вернуть context текущей async-цепочки
 }
 ```
 
@@ -61,7 +59,7 @@ run<T>(context: RequestContext, callback: () => T): T {
 
 Обязательные поля: `timestamp`, `level`, `service`, `environment`, `operation`, `requestId`, `traceId`, `durationMs`, `statusCode`; `userId`/`workspaceId` добавлять только как IDs после authentication.
 
-Запрещено логировать JWT/cookie, passwords, authorization headers, payment secrets/signatures, presigned URLs, raw webhook payload, document content и file body. Создать централизованный redact list и тесты для него.
+Запрещено логировать JWT/cookie, passwords, authorization headers, payment secrets/signatures, presigned URLs, raw webhook payload, document content и file body. Создать централизованный redact list.
 
 ## Traces
 
@@ -92,26 +90,6 @@ run<T>(context: RequestContext, callback: () => T): T {
 
 Глобальный exception filter формирует безопасный API response, логирует exception один раз и помечает текущий span. Неожиданные ошибки получают stable error ID (requestId) и `500`; stack trace доступен только в telemetry/log backend, не клиенту.
 
-## Порядок выполнения
-
-1. Ввести JSON logger/redaction, не меняя поведение API.
-2. Добавить request context и correlation ID в HTTP response/logs.
-3. Поднять collector/Jaeger/Prometheus и один HTTP trace.
-4. Подключить DB, Redis, S3 и external HTTP spans.
-5. Передать context в BullMQ worker и доказать единый trace.
-6. Добавить low-cardinality metrics, exception filter, degraded-mode и runbook.
-
-## Проверки
-
-- один HTTP request виден как trace с DB и Redis child spans;
-- export trace продолжается в worker после очереди;
-- payment call содержит outbound span;
-- requestId возвращается клиенту и находится в JSON logs;
-- redaction не пропускает seeded secrets/content;
-- collector/Jaeger/Prometheus недоступны — API и worker продолжают работу;
-- metric labels имеют ограниченный набор значений;
-- `4xx` и `5xx` корректно различаются.
-
 ## Runbook и критерии приёмки
 
-Создать `docs/operations/09-observability-runbook.md`: локальные URLs, пример поиска requestId, путь по trace, запросы Prometheus и алгоритм поиска bottleneck. Приложить smoke script, который создаёт request и export job и проверяет propagation до worker. Auth e2e и Docker-запуск не сломаны.
+Создать `docs/operations/09-observability-runbook.md`: локальные URLs, пример поиска requestId, путь по trace, запросы Prometheus и алгоритм поиска bottleneck. Один requestId связывает HTTP, зависимости и worker; redaction не пропускает secrets/content; недоступная telemetry-инфраструктура не останавливает API и worker. Docker-запуск остаётся рабочим.
