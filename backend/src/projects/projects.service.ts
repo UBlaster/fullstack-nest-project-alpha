@@ -1,36 +1,15 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
+import { ProjectStatus } from '@prisma/client';
+import { AccessPolicyService } from '../access/access-policy.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { CreateProjectDto, UpdateProjectDto } from './dto/project.dto';
 
 @Injectable()
 export class ProjectsService {
-	constructor(private prisma: PrismaService) {}
-
-	async ensureProjectAccess(id: string, userId: string) {
-		const project = await this.prisma.project.findUnique({
-			where: {
-				id,
-			},
-		});
-
-		if (!project) {
-			throw new NotFoundException();
-		}
-
-		const membership = await this.prisma.workspaceMember.findUnique({
-			where: {
-				userId_workspaceId: {
-					userId,
-					workspaceId: project.workspaceId,
-				},
-			},
-		});
-
-		if (!membership) {
-			throw new NotFoundException();
-		}
-
-		return project;
-	}
+	constructor(
+		private prisma: PrismaService,
+		private accessPolicy: AccessPolicyService,
+	) {}
 
 	async list(userId: string) {
 		return this.prisma.project.findMany({
@@ -61,8 +40,33 @@ export class ProjectsService {
 		});
 	}
 
+	async listByWorkspace(workspaceId: string, userId: string) {
+		await this.accessPolicy.requireWorkspace(userId, workspaceId, 'view');
+
+		return this.prisma.project.findMany({
+			where: {
+				workspaceId,
+			},
+			include: {
+				_count: {
+					select: {
+						documents: true,
+					},
+				},
+				createdBy: {
+					select: {
+						name: true,
+					},
+				},
+			},
+			orderBy: {
+				updatedAt: 'desc',
+			},
+		});
+	}
+
 	async get(id: string, userId: string) {
-		const project = await this.ensureProjectAccess(id, userId);
+		const project = await this.accessPolicy.requireProject(userId, id, 'view');
 
 		return this.prisma.project.findUnique({
 			where: {
@@ -85,39 +89,48 @@ export class ProjectsService {
 		});
 	}
 
-	async create(userId: string, data: any) {
-		const membership = await this.prisma.workspaceMember.findFirst({
-			where: {
-				userId,
-			},
-		});
-
-		if (!membership) {
-			throw new NotFoundException();
-		}
+	async create(workspaceId: string, userId: string, dto: CreateProjectDto) {
+		await this.accessPolicy.requireWorkspace(userId, workspaceId, 'create', 'project');
 
 		return this.prisma.project.create({
 			data: {
-				...data,
-				workspaceId: membership.workspaceId,
+				name: dto.name,
+				description: dto.description,
+				workspaceId,
 				createdById: userId,
 			},
 		});
 	}
 
-	async update(id: string, userId: string, data: any) {
-		await this.ensureProjectAccess(id, userId);
+	async update(id: string, userId: string, dto: UpdateProjectDto) {
+		await this.accessPolicy.requireProject(userId, id, 'update');
 
 		return this.prisma.project.update({
 			where: {
 				id,
 			},
-			data,
+			data: {
+				name: dto.name,
+				description: dto.description,
+			},
+		});
+	}
+
+	async archive(id: string, userId: string) {
+		await this.accessPolicy.requireProject(userId, id, 'archive');
+
+		return this.prisma.project.update({
+			where: {
+				id,
+			},
+			data: {
+				status: ProjectStatus.ARCHIVED,
+			},
 		});
 	}
 
 	async remove(id: string, userId: string) {
-		await this.ensureProjectAccess(id, userId);
+		await this.accessPolicy.requireProject(userId, id, 'delete');
 
 		return this.prisma.project.delete({
 			where: {

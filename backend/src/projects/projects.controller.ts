@@ -1,5 +1,6 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Req, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { UpdateProjectDto } from './dto/project.dto';
 import { ProjectsService } from './projects.service';
 
 @Controller('projects')
@@ -13,26 +14,30 @@ export class ProjectsController {
 	}
 
 	@UseGuards(AuthGuard('jwt'))
-	@Get(':id')
-	get(@Param('id') id: string, @Req() request: any) {
-		return this.projectsService.get(id, request.user.sub);
+	@Get(':projectId')
+	get(@Param('projectId') projectId: string, @Req() request: any) {
+		return this.projectsService.get(projectId, request.user.sub);
 	}
 
 	@UseGuards(AuthGuard('jwt'))
-	@Post()
-	create(@Body() data: any, @Req() request: any) {
-		return this.projectsService.create(request.user.sub, data);
+	@Patch(':projectId/archive')
+	archive(@Param('projectId') projectId: string, @Req() request: any) {
+		return this.projectsService.archive(projectId, request.user.sub);
 	}
 
 	@UseGuards(AuthGuard('jwt'))
-	@Patch(':id')
-	update(@Param('id') id: string, @Body() data: any, @Req() request: any) {
-		return this.projectsService.update(id, request.user.sub, data);
+	@Patch(':projectId')
+	update(
+		@Param('projectId') projectId: string,
+		@Body() dto: UpdateProjectDto,
+		@Req() request: any,
+	) {
+		return this.projectsService.update(projectId, request.user.sub, dto);
 	}
 
 	@UseGuards(AuthGuard('jwt'))
-	@Delete(':id')
-	remove(@Param('id') id: string, @Req() request: any) {
-		return this.projectsService.remove(id, request.user.sub);
+	@Delete(':projectId')
+	remove(@Param('projectId') projectId: string, @Req() request: any) {
+		return this.projectsService.remove(projectId, request.user.sub);
 	}
 }

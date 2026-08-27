@@ -1,56 +1,18 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
+import { DocumentStatus } from '@prisma/client';
+import { AccessPolicyService } from '../access/access-policy.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { ProjectsService } from '../projects/projects.service';
+import { CreateDocumentDto, UpdateDocumentDto } from './dto/document.dto';
 
 @Injectable()
 export class DocumentsService {
 	constructor(
 		private prisma: PrismaService,
-		private projectsService: ProjectsService,
+		private accessPolicy: AccessPolicyService,
 	) {}
 
-	private async ensureDocumentAccess(id: string, userId: string) {
-		const document = await this.prisma.document.findUnique({
-			where: {
-				id,
-			},
-			include: {
-				project: true,
-			},
-		});
-
-		if (!document) {
-			throw new NotFoundException();
-		}
-
-		const membership = await this.prisma.workspaceMember.findUnique({
-			where: {
-				userId_workspaceId: {
-					userId,
-					workspaceId: document.project.workspaceId,
-				},
-			},
-		});
-
-		if (!membership) {
-			throw new NotFoundException();
-		}
-
-		return document;
-	}
-
 	async list(projectId: string, userId: string) {
-		const project = await this.prisma.project.findUnique({
-			where: {
-				id: projectId,
-			},
-		});
-
-		if (!project) {
-			throw new NotFoundException();
-		}
-
-		await this.projectsService.ensureProjectAccess(projectId, userId);
+		await this.accessPolicy.requireProject(userId, projectId, 'view');
 
 		return this.prisma.document.findMany({
 			where: {
@@ -70,7 +32,7 @@ export class DocumentsService {
 	}
 
 	async get(id: string, userId: string) {
-		await this.ensureDocumentAccess(id, userId);
+		await this.accessPolicy.requireDocument(userId, id, 'view');
 
 		return this.prisma.document.findUnique({
 			where: {
@@ -87,31 +49,48 @@ export class DocumentsService {
 		});
 	}
 
-	async create(projectId: string, userId: string, data: any) {
-		await this.projectsService.ensureProjectAccess(projectId, userId);
+	async create(projectId: string, userId: string, dto: CreateDocumentDto) {
+		await this.accessPolicy.requireProject(userId, projectId, 'create', 'document');
 
 		return this.prisma.document.create({
 			data: {
-				...data,
+				title: dto.title,
+				content: dto.content,
 				projectId,
 				authorId: userId,
 			},
 		});
 	}
 
-	async update(id: string, userId: string, data: any) {
-		await this.ensureDocumentAccess(id, userId);
+	async update(id: string, userId: string, dto: UpdateDocumentDto) {
+		await this.accessPolicy.requireDocument(userId, id, 'update');
 
 		return this.prisma.document.update({
 			where: {
 				id,
 			},
-			data,
+			data: {
+				title: dto.title,
+				content: dto.content,
+			},
+		});
+	}
+
+	async archive(id: string, userId: string) {
+		await this.accessPolicy.requireDocument(userId, id, 'archive');
+
+		return this.prisma.document.update({
+			where: {
+				id,
+			},
+			data: {
+				status: DocumentStatus.ARCHIVED,
+			},
 		});
 	}
 
 	async remove(id: string, userId: string) {
-		await this.ensureDocumentAccess(id, userId);
+		await this.accessPolicy.requireDocument(userId, id, 'delete');
 
 		return this.prisma.document.delete({
 			where: {

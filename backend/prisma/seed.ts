@@ -1,42 +1,88 @@
-import { PrismaClient, WorkspaceRole, ProjectStatus, DocumentStatus } from '@prisma/client';
+import { DocumentStatus, PrismaClient, ProjectStatus, WorkspaceRole } from '@prisma/client';
+
 const p = new PrismaClient();
+
 async function main() {
 	const password = 'password123';
 	const users = [];
+
 	for (const [email, name] of [
 		['admin@example.com', 'Admin User'],
 		['member@example.com', 'Member User'],
 		['viewer@example.com', 'Viewer User'],
 		['other@example.com', 'Other User'],
-	])
+	]) {
 		users.push(
 			await p.user.upsert({
-				where: { email },
-				update: { password },
-				create: { email, name, password },
+				where: {
+					email,
+				},
+				update: {
+					password,
+				},
+				create: {
+					email,
+					name,
+					password,
+				},
 			}),
 		);
+	}
+
+	const outsider = users.find((user) => user.email === 'other@example.com');
+	const memberUsers = users.filter((user) => user.email !== 'other@example.com');
+
+	if (outsider) {
+		await p.workspaceMember.deleteMany({
+			where: {
+				userId: outsider.id,
+			},
+		});
+	}
+
 	const roles = [
 		WorkspaceRole.OWNER,
 		WorkspaceRole.ADMIN,
 		WorkspaceRole.MEMBER,
 		WorkspaceRole.VIEWER,
 	];
+
 	for (let w = 0; w < 3; w++) {
 		const ws = await p.workspace.upsert({
-			where: { id: `seed-workspace-${w + 1}` },
+			where: {
+				id: `seed-workspace-${w + 1}`,
+			},
 			update: {},
-			create: { id: `seed-workspace-${w + 1}`, name: `Workspace ${String.fromCharCode(65 + w)}` },
+			create: {
+				id: `seed-workspace-${w + 1}`,
+				name: `Workspace ${String.fromCharCode(65 + w)}`,
+			},
 		});
-		for (let i = 0; i < users.length; i++)
+
+		for (let i = 0; i < memberUsers.length; i++) {
 			await p.workspaceMember.upsert({
-				where: { userId_workspaceId: { userId: users[i].id, workspaceId: ws.id } },
-				update: { role: roles[(i + w) % roles.length] },
-				create: { userId: users[i].id, workspaceId: ws.id, role: roles[(i + w) % roles.length] },
+				where: {
+					userId_workspaceId: {
+						userId: memberUsers[i].id,
+						workspaceId: ws.id,
+					},
+				},
+				update: {
+					role: roles[(i + w) % roles.length],
+				},
+				create: {
+					userId: memberUsers[i].id,
+					workspaceId: ws.id,
+					role: roles[(i + w) % roles.length],
+				},
 			});
+		}
+
 		for (let j = 0; j < 40; j++) {
 			const project = await p.project.upsert({
-				where: { id: `seed-project-${w}-${j}` },
+				where: {
+					id: `seed-project-${w}-${j}`,
+				},
 				update: {},
 				create: {
 					id: `seed-project-${w}-${j}`,
@@ -47,9 +93,12 @@ async function main() {
 					createdById: users[(j + w) % users.length].id,
 				},
 			});
-			for (let k = 0; k < 30; k++)
+
+			for (let k = 0; k < 30; k++) {
 				await p.document.upsert({
-					where: { id: `seed-document-${w}-${j}-${k}` },
+					where: {
+						id: `seed-document-${w}-${j}-${k}`,
+					},
 					update: {},
 					create: {
 						id: `seed-document-${w}-${j}-${k}`,
@@ -63,8 +112,11 @@ async function main() {
 						status: [DocumentStatus.DRAFT, DocumentStatus.ACTIVE, DocumentStatus.ARCHIVED][k % 3],
 					},
 				});
+			}
 		}
 	}
+
 	console.log('Seed completed');
 }
+
 main().finally(() => p.$disconnect());
