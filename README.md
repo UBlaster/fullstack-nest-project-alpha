@@ -44,7 +44,7 @@ docker compose up --build
 
 Для фонового запуска используйте `docker compose up --build -d`.
 
-Compose запускает frontend, backend, PostgreSQL и служебный `db-init`, который подготавливает базу и seed-данные. Для работы приложения локальные `node_modules` не требуются.
+Compose запускает frontend, backend, PostgreSQL и служебный `db-init`, который применяет migrations и добавляет seed-данные только в пустую базу. При последующих запусках Docker существующие данные не перезаписываются. Для работы приложения локальные `node_modules` не требуются.
 
 Адреса сервисов:
 

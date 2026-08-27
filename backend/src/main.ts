@@ -1,13 +1,15 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { createAppValidationPipe } from './validation.pipe';
-import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 
 async function bootstrap() {
 	const app = await NestFactory.create(AppModule);
 
-	app.enableCors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' });
+	app.enableCors({
+		origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+	});
 	app.useGlobalPipes(createAppValidationPipe());
 
 	const swaggerDocument = SwaggerModule.createDocument(

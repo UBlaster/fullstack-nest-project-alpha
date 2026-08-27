@@ -1,6 +1,6 @@
 import { DocumentStatus, PrismaClient, ProjectStatus, WorkspaceRole } from '@prisma/client';
 
-const p = new PrismaClient();
+const prisma = new PrismaClient();
 
 async function main() {
 	const password = 'password123';
@@ -13,7 +13,7 @@ async function main() {
 		['other@example.com', 'Other User'],
 	]) {
 		users.push(
-			await p.user.upsert({
+			await prisma.user.upsert({
 				where: {
 					email,
 				},
@@ -33,7 +33,7 @@ async function main() {
 	const memberUsers = users.filter((user) => user.email !== 'other@example.com');
 
 	if (outsider) {
-		await p.workspaceMember.deleteMany({
+		await prisma.workspaceMember.deleteMany({
 			where: {
 				userId: outsider.id,
 			},
@@ -47,69 +47,71 @@ async function main() {
 		WorkspaceRole.VIEWER,
 	];
 
-	for (let w = 0; w < 3; w++) {
-		const ws = await p.workspace.upsert({
+	for (let workspaceIndex = 0; workspaceIndex < 3; workspaceIndex++) {
+		const workspace = await prisma.workspace.upsert({
 			where: {
-				id: `seed-workspace-${w + 1}`,
+				id: `seed-workspace-${workspaceIndex + 1}`,
 			},
 			update: {},
 			create: {
-				id: `seed-workspace-${w + 1}`,
-				name: `Workspace ${String.fromCharCode(65 + w)}`,
+				id: `seed-workspace-${workspaceIndex + 1}`,
+				name: `Workspace ${String.fromCharCode(65 + workspaceIndex)}`,
 			},
 		});
 
-		for (let i = 0; i < memberUsers.length; i++) {
-			await p.workspaceMember.upsert({
+		for (let memberIndex = 0; memberIndex < memberUsers.length; memberIndex++) {
+			await prisma.workspaceMember.upsert({
 				where: {
 					userId_workspaceId: {
-						userId: memberUsers[i].id,
-						workspaceId: ws.id,
+						userId: memberUsers[memberIndex].id,
+						workspaceId: workspace.id,
 					},
 				},
 				update: {
-					role: roles[(i + w) % roles.length],
+					role: roles[(memberIndex + workspaceIndex) % roles.length],
 				},
 				create: {
-					userId: memberUsers[i].id,
-					workspaceId: ws.id,
-					role: roles[(i + w) % roles.length],
+					userId: memberUsers[memberIndex].id,
+					workspaceId: workspace.id,
+					role: roles[(memberIndex + workspaceIndex) % roles.length],
 				},
 			});
 		}
 
-		for (let j = 0; j < 40; j++) {
-			const project = await p.project.upsert({
+		for (let projectIndex = 0; projectIndex < 40; projectIndex++) {
+			const project = await prisma.project.upsert({
 				where: {
-					id: `seed-project-${w}-${j}`,
+					id: `seed-project-${workspaceIndex}-${projectIndex}`,
 				},
 				update: {},
 				create: {
-					id: `seed-project-${w}-${j}`,
-					workspaceId: ws.id,
-					name: `${['Backend Platform', 'Product Knowledge', 'Internal Documentation'][j % 3]} ${j + 1}`,
+					id: `seed-project-${workspaceIndex}-${projectIndex}`,
+					workspaceId: workspace.id,
+					name: `${['Backend Platform', 'Product Knowledge', 'Internal Documentation'][projectIndex % 3]} ${projectIndex + 1}`,
 					description: 'Учебный production-like проект',
-					status: j % 9 === 0 ? ProjectStatus.ARCHIVED : ProjectStatus.ACTIVE,
-					createdById: users[(j + w) % users.length].id,
+					status: projectIndex % 9 === 0 ? ProjectStatus.ARCHIVED : ProjectStatus.ACTIVE,
+					createdById: users[(projectIndex + workspaceIndex) % users.length].id,
 				},
 			});
 
-			for (let k = 0; k < 30; k++) {
-				await p.document.upsert({
+			for (let documentIndex = 0; documentIndex < 30; documentIndex++) {
+				await prisma.document.upsert({
 					where: {
-						id: `seed-document-${w}-${j}-${k}`,
+						id: `seed-document-${workspaceIndex}-${projectIndex}-${documentIndex}`,
 					},
 					update: {},
 					create: {
-						id: `seed-document-${w}-${j}-${k}`,
+						id: `seed-document-${workspaceIndex}-${projectIndex}-${documentIndex}`,
 						projectId: project.id,
-						authorId: users[(k + j) % users.length].id,
-						title: `Document ${k + 1}: API and architecture`,
+						authorId: users[(documentIndex + projectIndex) % users.length].id,
+						title: `Document ${documentIndex + 1}: API and architecture`,
 						content:
-							`Учебный документ ${k + 1}. Архитектура, API, database migrations and deployment notes. `.repeat(
-								(k % 4) + 1,
+							`Учебный документ ${documentIndex + 1}. Архитектура, API, database migrations and deployment notes. `.repeat(
+								(documentIndex % 4) + 1,
 							),
-						status: [DocumentStatus.DRAFT, DocumentStatus.ACTIVE, DocumentStatus.ARCHIVED][k % 3],
+						status: [DocumentStatus.DRAFT, DocumentStatus.ACTIVE, DocumentStatus.ARCHIVED][
+							documentIndex % 3
+						],
 					},
 				});
 			}
@@ -119,4 +121,4 @@ async function main() {
 	console.log('Seed completed');
 }
 
-main().finally(() => p.$disconnect());
+main().finally(() => prisma.$disconnect());

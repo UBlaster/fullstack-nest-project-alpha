@@ -117,12 +117,15 @@ command: ["sh", "-c", "npx prisma migrate deploy && npx prisma db seed"]
 1. PostgreSQL запускается
 2. PostgreSQL становится готовой принимать подключения
 3. db-init выполняет prisma migrate deploy
-4. db-init выполняет prisma db seed
+4. db-init выполняет prisma db seed; seed добавляет демонстрационные данные только при отсутствии пользователей
 5. backend запускается
 ```
 
 Команда `prisma migrate deploy` применяет уже существующие migrations по порядку.
 Она не создаёт новую migration из изменений в `schema.prisma`.
+
+Команда seed запускается при каждом создании `db-init`, но сам скрипт сначала проверяет базу.
+Если в ней уже есть хотя бы один пользователь, seed завершается без изменения существующих данных.
 
 Поэтому простая пересборка Docker не заменяет создание migration.
 

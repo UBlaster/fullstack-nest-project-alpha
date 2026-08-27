@@ -6,13 +6,23 @@ export const api = async (path: string, options: RequestInit = {}) => {
 		...options,
 		headers: {
 			'Content-Type': 'application/json',
-			...(token ? { Authorization: `Bearer ${token}` } : {}),
+			...(token
+				? {
+						Authorization: `Bearer ${token}`,
+					}
+				: {}),
 			...(options.headers || {}),
 		},
 	});
-	if (!response.ok)
+	if (!response.ok) {
 		throw new Error(
-			(await response.json().catch(() => ({ message: response.statusText }))).message,
+			(
+				await response.json().catch(() => ({
+					message: response.statusText,
+				}))
+			).message,
 		);
+	}
+
 	return response.status === 204 ? null : response.json();
 };

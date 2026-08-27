@@ -1,9 +1,9 @@
 import { useEffect } from 'react';
 import { Route, Routes, useNavigate } from 'react-router-dom';
-import { LoginPage } from '../pages/login';
-import { ProjectsPage } from '../pages/projects';
-import { ProjectPage } from '../pages/project';
 import { DocumentPage } from '../pages/document';
+import { LoginPage } from '../pages/login';
+import { ProjectPage } from '../pages/project';
+import { ProjectsPage } from '../pages/projects';
 
 function RootRedirect() {
 	const navigate = useNavigate();
