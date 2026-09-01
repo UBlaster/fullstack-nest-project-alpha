@@ -1,38 +1,50 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { AuthenticatedRequest } from '../auth/authenticated-request';
+import { CreateDocumentDto } from './dto/create-document.dto';
+import { UpdateDocumentDto } from './dto/update-document.dto';
 import { DocumentsService } from './documents.service';
 
+@UseGuards(AuthGuard('jwt'))
 @Controller()
 export class DocumentsController {
-	constructor(private documentsService: DocumentsService) {}
+	constructor(private readonly documentsService: DocumentsService) {}
 
-	@UseGuards(AuthGuard('jwt'))
 	@Get('projects/:projectId/documents')
-	list(@Param('projectId') projectId: string, @Req() request: any) {
-		return this.documentsService.list(projectId, request.user.sub);
+	list(@Param('projectId') projectId: string, @Req() request: AuthenticatedRequest) {
+		return this.documentsService.list(request.user.sub, projectId);
 	}
 
-	@UseGuards(AuthGuard('jwt'))
-	@Get('documents/:id')
-	get(@Param('id') id: string, @Req() request: any) {
-		return this.documentsService.get(id, request.user.sub);
-	}
-
-	@UseGuards(AuthGuard('jwt'))
 	@Post('projects/:projectId/documents')
-	create(@Param('projectId') projectId: string, @Body() data: any, @Req() request: any) {
-		return this.documentsService.create(projectId, request.user.sub, data);
+	create(
+		@Param('projectId') projectId: string,
+		@Body() dto: CreateDocumentDto,
+		@Req() request: AuthenticatedRequest,
+	) {
+		return this.documentsService.create(request.user.sub, projectId, dto);
 	}
 
-	@UseGuards(AuthGuard('jwt'))
-	@Patch('documents/:id')
-	update(@Param('id') id: string, @Body() data: any, @Req() request: any) {
-		return this.documentsService.update(id, request.user.sub, data);
+	@Get('documents/:documentId')
+	get(@Param('documentId') documentId: string, @Req() request: AuthenticatedRequest) {
+		return this.documentsService.get(request.user.sub, documentId);
 	}
 
-	@UseGuards(AuthGuard('jwt'))
-	@Delete('documents/:id')
-	remove(@Param('id') id: string, @Req() request: any) {
-		return this.documentsService.remove(id, request.user.sub);
+	@Patch('documents/:documentId/archive')
+	archive(@Param('documentId') documentId: string, @Req() request: AuthenticatedRequest) {
+		return this.documentsService.archive(request.user.sub, documentId);
+	}
+
+	@Patch('documents/:documentId')
+	update(
+		@Param('documentId') documentId: string,
+		@Body() dto: UpdateDocumentDto,
+		@Req() request: AuthenticatedRequest,
+	) {
+		return this.documentsService.update(request.user.sub, documentId, dto);
+	}
+
+	@Delete('documents/:documentId')
+	remove(@Param('documentId') documentId: string, @Req() request: AuthenticatedRequest) {
+		return this.documentsService.remove(request.user.sub, documentId);
 	}
 }
