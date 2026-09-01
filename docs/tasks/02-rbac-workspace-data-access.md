@@ -6,6 +6,19 @@
 > [!note] Перед началом
 > Сначала прочитайте [RBAC и изоляция данных в NestJS](../guides/02-rbac-and-data-isolation-primer.md). Guide содержит полную реализацию на примере Team -> Board -> Note. В этой задаче вы последовательно переносите тот же pattern на Workspace -> Project -> Document.
 
+Начинайте задачу от ветки `feature/task-2-start`. В ней уже находится результат предыдущей задачи и тесты для самопроверки задачи 2:
+
+```bash
+git fetch origin
+git switch --create task-2 --track origin/feature/task-2-start
+```
+
+Запускайте E2E-тесты во время работы:
+
+```bash
+docker compose exec backend npm run test:e2e
+```
+
 ## 1. Исходное состояние: сразу после предыдущей задачи
 
 Начинайте работу из текущего состояния проекта. В нём уже выполнено следующее:
