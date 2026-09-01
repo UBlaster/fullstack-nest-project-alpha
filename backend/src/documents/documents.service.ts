@@ -1,122 +1,83 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
+import { DocumentStatus } from '@prisma/client';
+import { AccessPolicyService } from '../access/access-policy.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { ProjectsService } from '../projects/projects.service';
+import { CreateDocumentDto } from './dto/create-document.dto';
+import { UpdateDocumentDto } from './dto/update-document.dto';
 
 @Injectable()
 export class DocumentsService {
 	constructor(
-		private prisma: PrismaService,
-		private projectsService: ProjectsService,
+		private readonly prisma: PrismaService,
+		private readonly accessPolicy: AccessPolicyService,
 	) {}
 
-	private async ensureDocumentAccess(id: string, userId: string) {
-		const document = await this.prisma.document.findUnique({
-			where: {
-				id,
-			},
-			include: {
-				project: true,
-			},
-		});
-
-		if (!document) {
-			throw new NotFoundException();
-		}
-
-		const membership = await this.prisma.workspaceMember.findUnique({
-			where: {
-				userId_workspaceId: {
-					userId,
-					workspaceId: document.project.workspaceId,
-				},
-			},
-		});
-
-		if (!membership) {
-			throw new NotFoundException();
-		}
-
-		return document;
-	}
-
-	async list(projectId: string, userId: string) {
-		const project = await this.prisma.project.findUnique({
-			where: {
-				id: projectId,
-			},
-		});
-
-		if (!project) {
-			throw new NotFoundException();
-		}
-
-		await this.projectsService.ensureProjectAccess(projectId, userId);
-
+	async list(userId: string, projectId: string) {
+		await this.accessPolicy.requireProject(userId, projectId, 'view', 'document');
 		return this.prisma.document.findMany({
-			where: {
-				projectId,
-			},
+			where: { projectId },
 			include: {
 				author: {
-					select: {
-						name: true,
-					},
+					select: { name: true },
 				},
 			},
-			orderBy: {
-				updatedAt: 'desc',
-			},
+			orderBy: { updatedAt: 'desc' },
 		});
 	}
 
-	async get(id: string, userId: string) {
-		await this.ensureDocumentAccess(id, userId);
-
+	async get(userId: string, documentId: string) {
+		await this.accessPolicy.requireDocument(userId, documentId, 'view');
 		return this.prisma.document.findUnique({
-			where: {
-				id,
-			},
+			where: { id: documentId },
 			include: {
 				author: {
-					select: {
-						name: true,
-					},
+					select: { name: true },
 				},
 				project: true,
 			},
 		});
 	}
 
-	async create(projectId: string, userId: string, data: any) {
-		await this.projectsService.ensureProjectAccess(projectId, userId);
-
+	async create(userId: string, projectId: string, dto: CreateDocumentDto) {
+		await this.accessPolicy.requireProject(userId, projectId, 'create', 'document');
 		return this.prisma.document.create({
 			data: {
-				...data,
+				title: dto.title,
+				content: dto.content,
 				projectId,
 				authorId: userId,
 			},
 		});
 	}
 
-	async update(id: string, userId: string, data: any) {
-		await this.ensureDocumentAccess(id, userId);
+	async update(userId: string, documentId: string, dto: UpdateDocumentDto) {
+		await this.accessPolicy.requireDocument(userId, documentId, 'update');
+
+		if (dto.title === undefined && dto.content === undefined) {
+			throw new BadRequestException('At least one field is required');
+		}
 
 		return this.prisma.document.update({
-			where: {
-				id,
+			where: { id: documentId },
+			data: {
+				title: dto.title,
+				content: dto.content,
 			},
-			data,
 		});
 	}
 
-	async remove(id: string, userId: string) {
-		await this.ensureDocumentAccess(id, userId);
+	async archive(userId: string, documentId: string) {
+		await this.accessPolicy.requireDocument(userId, documentId, 'archive');
+		return this.prisma.document.update({
+			where: { id: documentId },
+			data: { status: DocumentStatus.ARCHIVED },
+		});
+	}
 
+	async remove(userId: string, documentId: string) {
+		await this.accessPolicy.requireDocument(userId, documentId, 'delete');
 		return this.prisma.document.delete({
-			where: {
-				id,
-			},
+			where: { id: documentId },
 		});
 	}
 }

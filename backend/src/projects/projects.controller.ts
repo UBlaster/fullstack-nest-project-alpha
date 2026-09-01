@@ -15,9 +15,14 @@ export class ProjectsController {
 		return this.projectsService.list(request.user.sub);
 	}
 
+	@Get('workspaces/:workspaceId/projects')
+	listByWorkspace(@Param('workspaceId') workspaceId: string, @Req() request: AuthenticatedRequest) {
+		return this.projectsService.listByWorkspace(request.user.sub, workspaceId);
+	}
+
 	@Get('projects/:projectId')
 	get(@Param('projectId') projectId: string, @Req() request: AuthenticatedRequest) {
-		return this.projectsService.get(projectId, request.user.sub);
+		return this.projectsService.get(request.user.sub, projectId);
 	}
 
 	@Post('workspaces/:workspaceId/projects')
@@ -29,17 +34,22 @@ export class ProjectsController {
 		return this.projectsService.create(request.user.sub, workspaceId, dto);
 	}
 
+	@Patch('projects/:projectId/archive')
+	archive(@Param('projectId') projectId: string, @Req() request: AuthenticatedRequest) {
+		return this.projectsService.archive(request.user.sub, projectId);
+	}
+
 	@Patch('projects/:projectId')
 	update(
 		@Param('projectId') projectId: string,
 		@Body() dto: UpdateProjectDto,
 		@Req() request: AuthenticatedRequest,
 	) {
-		return this.projectsService.update(projectId, request.user.sub, dto);
+		return this.projectsService.update(request.user.sub, projectId, dto);
 	}
 
 	@Delete('projects/:projectId')
 	remove(@Param('projectId') projectId: string, @Req() request: AuthenticatedRequest) {
-		return this.projectsService.remove(projectId, request.user.sub);
+		return this.projectsService.remove(request.user.sub, projectId);
 	}
 }

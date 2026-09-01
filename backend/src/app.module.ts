@@ -4,6 +4,7 @@ import { AuthModule } from './auth/auth.module';
 import { DocumentsModule } from './documents/documents.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ProjectsModule } from './projects/projects.module';
+import { WorkspacesModule } from './workspaces/workspaces.module';
 
 @Controller('health')
 class HealthController {
@@ -22,6 +23,7 @@ class HealthController {
 		}),
 		PrismaModule,
 		AuthModule,
+		WorkspacesModule,
 		ProjectsModule,
 		DocumentsModule,
 	],

@@ -38,12 +38,8 @@ async function main() {
 		);
 	}
 
-	const roles = [
-		WorkspaceRole.OWNER,
-		WorkspaceRole.ADMIN,
-		WorkspaceRole.MEMBER,
-		WorkspaceRole.VIEWER,
-	];
+	const roles = [WorkspaceRole.OWNER, WorkspaceRole.MEMBER, WorkspaceRole.VIEWER];
+	const memberUsers = users.filter((user) => user.email !== 'other@example.com');
 
 	for (let workspaceIndex = 0; workspaceIndex < 3; workspaceIndex++) {
 		const workspace = await prisma.workspace.upsert({
@@ -57,21 +53,21 @@ async function main() {
 			},
 		});
 
-		for (let userIndex = 0; userIndex < users.length; userIndex++) {
+		for (let userIndex = 0; userIndex < memberUsers.length; userIndex++) {
 			await prisma.workspaceMember.upsert({
 				where: {
 					userId_workspaceId: {
-						userId: users[userIndex].id,
+						userId: memberUsers[userIndex].id,
 						workspaceId: workspace.id,
 					},
 				},
 				update: {
-					role: roles[(userIndex + workspaceIndex) % roles.length],
+					role: roles[userIndex],
 				},
 				create: {
-					userId: users[userIndex].id,
+					userId: memberUsers[userIndex].id,
 					workspaceId: workspace.id,
-					role: roles[(userIndex + workspaceIndex) % roles.length],
+					role: roles[userIndex],
 				},
 			});
 		}
@@ -88,7 +84,7 @@ async function main() {
 					name: `${['Backend Platform', 'Product Knowledge', 'Internal Documentation'][projectIndex % 3]} ${projectIndex + 1}`,
 					description: 'Учебный production-like проект',
 					status: projectIndex % 9 === 0 ? ProjectStatus.ARCHIVED : ProjectStatus.ACTIVE,
-					createdById: users[(projectIndex + workspaceIndex) % users.length].id,
+					createdById: memberUsers[(projectIndex + workspaceIndex) % memberUsers.length].id,
 				},
 			});
 
@@ -101,7 +97,7 @@ async function main() {
 					create: {
 						id: `seed-document-${workspaceIndex}-${projectIndex}-${documentIndex}`,
 						projectId: project.id,
-						authorId: users[(documentIndex + projectIndex) % users.length].id,
+						authorId: memberUsers[(documentIndex + projectIndex) % memberUsers.length].id,
 						title: `Document ${documentIndex + 1}: API and architecture`,
 						content:
 							`Учебный документ ${documentIndex + 1}. Архитектура, API, database migrations and deployment notes. `.repeat(
