@@ -1,38 +1,45 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { AuthenticatedRequest } from '../auth/authenticated-request';
+import { CreateProjectDto } from './dto/create-project.dto';
+import { UpdateProjectDto } from './dto/update-project.dto';
 import { ProjectsService } from './projects.service';
 
-@Controller('projects')
+@UseGuards(AuthGuard('jwt'))
+@Controller()
 export class ProjectsController {
-	constructor(private projectsService: ProjectsService) {}
+	constructor(private readonly projectsService: ProjectsService) {}
 
-	@UseGuards(AuthGuard('jwt'))
-	@Get()
-	list(@Req() request: any) {
+	@Get('projects')
+	list(@Req() request: AuthenticatedRequest) {
 		return this.projectsService.list(request.user.sub);
 	}
 
-	@UseGuards(AuthGuard('jwt'))
-	@Get(':id')
-	get(@Param('id') id: string, @Req() request: any) {
-		return this.projectsService.get(id, request.user.sub);
+	@Get('projects/:projectId')
+	get(@Param('projectId') projectId: string, @Req() request: AuthenticatedRequest) {
+		return this.projectsService.get(projectId, request.user.sub);
 	}
 
-	@UseGuards(AuthGuard('jwt'))
-	@Post()
-	create(@Body() data: any, @Req() request: any) {
-		return this.projectsService.create(request.user.sub, data);
+	@Post('workspaces/:workspaceId/projects')
+	create(
+		@Param('workspaceId') workspaceId: string,
+		@Body() dto: CreateProjectDto,
+		@Req() request: AuthenticatedRequest,
+	) {
+		return this.projectsService.create(request.user.sub, workspaceId, dto);
 	}
 
-	@UseGuards(AuthGuard('jwt'))
-	@Patch(':id')
-	update(@Param('id') id: string, @Body() data: any, @Req() request: any) {
-		return this.projectsService.update(id, request.user.sub, data);
+	@Patch('projects/:projectId')
+	update(
+		@Param('projectId') projectId: string,
+		@Body() dto: UpdateProjectDto,
+		@Req() request: AuthenticatedRequest,
+	) {
+		return this.projectsService.update(projectId, request.user.sub, dto);
 	}
 
-	@UseGuards(AuthGuard('jwt'))
-	@Delete(':id')
-	remove(@Param('id') id: string, @Req() request: any) {
-		return this.projectsService.remove(id, request.user.sub);
+	@Delete('projects/:projectId')
+	remove(@Param('projectId') projectId: string, @Req() request: AuthenticatedRequest) {
+		return this.projectsService.remove(projectId, request.user.sub);
 	}
 }

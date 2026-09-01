@@ -1,21 +1,19 @@
-import {
-	Body,
-	Controller,
-	Delete,
-	Get,
-	HttpCode,
-	Param,
-	Post,
-	Req,
-	UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Post, Req, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { AuthenticatedRequest } from './authenticated-request';
 import { AuthService } from './auth.service';
-import { createUserDto, LoginDto } from './dto/login.dto';
+import { DeleteAccountDto } from './dto/delete-account.dto';
+import { LoginDto } from './dto/login.dto';
+import { RegisterDto } from './dto/register.dto';
 
 @Controller('auth')
 export class AuthController {
-	constructor(private authService: AuthService) {}
+	constructor(private readonly authService: AuthService) {}
+
+	@Post('register')
+	register(@Body() dto: RegisterDto) {
+		return this.authService.register(dto);
+	}
 
 	@Post('login')
 	@HttpCode(200)
@@ -25,18 +23,13 @@ export class AuthController {
 
 	@UseGuards(AuthGuard('jwt'))
 	@Get('me')
-	me(@Req() request: any) {
+	me(@Req() request: AuthenticatedRequest) {
 		return this.authService.me(request.user.sub);
 	}
 
 	@UseGuards(AuthGuard('jwt'))
-	@Delete('delete')
-	delete(@Param('id') id: string) {
-		return this.authService.delete(id);
-	}
-
-	@Post('create')
-	register(@Body() dto: createUserDto) {
-		return this.authService.create(dto);
+	@Delete('me')
+	deleteAccount(@Req() request: AuthenticatedRequest, @Body() dto: DeleteAccountDto) {
+		return this.authService.deleteAccount(request.user.sub, dto);
 	}
 }

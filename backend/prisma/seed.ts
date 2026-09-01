@@ -1,4 +1,5 @@
 import { DocumentStatus, PrismaClient, ProjectStatus, WorkspaceRole } from '@prisma/client';
+import * as bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
 
@@ -10,6 +11,8 @@ async function main() {
 	}
 
 	const password = 'password123';
+	const bcryptRounds = Number(process.env.BCRYPT_ROUNDS ?? 12);
+	const passwordHash = await bcrypt.hash(password, bcryptRounds);
 	const users = [];
 
 	for (const [email, name] of [
@@ -24,12 +27,12 @@ async function main() {
 					email,
 				},
 				update: {
-					password,
+					password: passwordHash,
 				},
 				create: {
 					email,
 					name,
-					password,
+					password: passwordHash,
 				},
 			}),
 		);

@@ -13,7 +13,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile.dev
     command: ["sh", "-c", "npx prisma migrate deploy && npx prisma db seed"]
-    environment: {DATABASE_URL: "postgresql://app:app@postgres:5432/workspace_docs?schema=public"}
+    environment:
+      DATABASE_URL: "postgresql://app:app@postgres:5432/workspace_docs?schema=public"
+      BCRYPT_ROUNDS: "${BCRYPT_ROUNDS:-12}"
     depends_on: {postgres: {condition: service_healthy}}
   backend:
     build:
@@ -23,6 +25,7 @@ services:
       DATABASE_URL: "postgresql://app:app@postgres:5432/workspace_docs?schema=public"
       JWT_SECRET: "${JWT_SECRET:-dev-secret}"
       JWT_EXPIRES_IN: "1d"
+      BCRYPT_ROUNDS: "${BCRYPT_ROUNDS:-12}"
       PORT: "3000"
       CORS_ORIGIN: "http://localhost:5173"
       TSC_WATCHFILE: "DynamicPriorityPolling"
