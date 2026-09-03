@@ -11,3 +11,4 @@ backend/.env
 postgres-data
 .DS_Store
 npm-debug.log*
+docs/
