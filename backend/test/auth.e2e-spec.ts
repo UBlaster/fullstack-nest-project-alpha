@@ -3,6 +3,7 @@ import { Test } from '@nestjs/testing';
 import { WorkspaceRole } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import * as request from 'supertest';
+import { seedDatabase } from '../prisma/seed';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { createAppValidationPipe } from '../src/validation.pipe';
@@ -76,6 +77,39 @@ describe('Task 1 auth and projects (e2e)', () => {
 
 		expect(wrongPassword.body.message).toBe('Invalid credentials');
 		expect(unknownEmail.body.message).toBe('Invalid credentials');
+	});
+
+	it('repairs a plaintext demo password during seed and allows login', async () => {
+		const seedEmail = 'other@example.com';
+		const existingSeedUser = await prisma.user.findUnique({ where: { email: seedEmail } });
+
+		await prisma.user.upsert({
+			where: { email: seedEmail },
+			update: { password },
+			create: { email: seedEmail, name: 'Other User', password },
+		});
+
+		try {
+			await seedDatabase(prisma);
+
+			const repairedUser = await prisma.user.findUniqueOrThrow({ where: { email: seedEmail } });
+			expect(repairedUser.password).toMatch(/^\$2[aby]\$/);
+			expect(await bcrypt.compare(password, repairedUser.password)).toBe(true);
+
+			await request(app.getHttpServer())
+				.post('/auth/login')
+				.send({ email: seedEmail, password })
+				.expect(200);
+		} finally {
+			if (existingSeedUser) {
+				await prisma.user.update({
+					where: { id: existingSeedUser.id },
+					data: { password: existingSeedUser.password },
+				});
+			} else {
+				await prisma.user.delete({ where: { email: seedEmail } });
+			}
+		}
 	});
 
 	it('validates registration, stores a bcrypt hash, and never returns it', async () => {
