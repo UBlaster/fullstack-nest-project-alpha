@@ -1,26 +1,52 @@
 import { DocumentStatus, PrismaClient, ProjectStatus, WorkspaceRole } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 
-const prisma = new PrismaClient();
+const seedPassword = 'password123';
+const seedUsers = [
+	['admin@example.com', 'Admin User'],
+	['member@example.com', 'Member User'],
+	['viewer@example.com', 'Viewer User'],
+	['other@example.com', 'Other User'],
+] as const;
 
-async function main() {
+export async function seedDatabase(prisma: PrismaClient) {
 	const existingUsers = await prisma.user.count();
+	const bcryptRounds = Number(process.env.BCRYPT_ROUNDS ?? 12);
+	if (!Number.isInteger(bcryptRounds) || bcryptRounds < 4 || bcryptRounds > 31) {
+		throw new Error('BCRYPT_ROUNDS must be an integer between 4 and 31');
+	}
+
+	const existingSeedUsers = await prisma.user.findMany({
+		where: { email: { in: seedUsers.map(([email]) => email) } },
+		select: { id: true, password: true },
+	});
+	const usersWithInvalidPasswords = (
+		await Promise.all(
+			existingSeedUsers.map(async (user) => ({
+				id: user.id,
+				passwordMatches: await bcrypt.compare(seedPassword, user.password).catch(() => false),
+			})),
+		)
+	).filter((user) => !user.passwordMatches);
+
+	if (usersWithInvalidPasswords.length > 0) {
+		const passwordHash = await bcrypt.hash(seedPassword, bcryptRounds);
+		await prisma.user.updateMany({
+			where: { id: { in: usersWithInvalidPasswords.map(({ id }) => id) } },
+			data: { password: passwordHash },
+		});
+		console.log(`Seed repaired ${usersWithInvalidPasswords.length} demo user password(s)`);
+	}
+
 	if (existingUsers > 0) {
 		console.log(`Seed skipped: database already contains ${existingUsers} user(s)`);
 		return;
 	}
 
-	const password = 'password123';
-	const bcryptRounds = Number(process.env.BCRYPT_ROUNDS ?? 12);
-	const passwordHash = await bcrypt.hash(password, bcryptRounds);
+	const passwordHash = await bcrypt.hash(seedPassword, bcryptRounds);
 	const users = [];
 
-	for (const [email, name] of [
-		['admin@example.com', 'Admin User'],
-		['member@example.com', 'Member User'],
-		['viewer@example.com', 'Viewer User'],
-		['other@example.com', 'Other User'],
-	]) {
+	for (const [email, name] of seedUsers) {
 		users.push(
 			await prisma.user.upsert({
 				where: {
@@ -119,4 +145,15 @@ async function main() {
 	console.log('Seed completed');
 }
 
-main().finally(() => prisma.$disconnect());
+async function main() {
+	const prisma = new PrismaClient();
+	try {
+		await seedDatabase(prisma);
+	} finally {
+		await prisma.$disconnect();
+	}
+}
+
+if (require.main === module) {
+	void main();
+}
