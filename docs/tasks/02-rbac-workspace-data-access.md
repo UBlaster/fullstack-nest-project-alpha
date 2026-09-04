@@ -181,7 +181,6 @@ backend/src/documents/dto/create-document.dto.ts
 backend/src/documents/dto/update-document.dto.ts
 backend/prisma/migrations/<timestamp>_simplify_roles_and_add_workspace_status/migration.sql
 backend/test/rbac.e2e-spec.ts
-docs/api/rbac.md
 ```
 
 Измените:
@@ -511,18 +510,7 @@ Checkpoint:
 
 Существующие семь e2e предыдущей задачи должны продолжать проходить.
 
-## 17. Шаг 10. Документация и финальная проверка
-
-Создайте docs/api/rbac.md:
-
-- три роли и permission matrix;
-- правило ADMIN -> MEMBER для migration;
-- routes;
-- 401/403/404;
-- hidden 404;
-- archive semantics;
-- whitelist behavior;
-- frontend compatibility.
+## 17. Шаг 10. Финальная проверка
 
 README не изменяйте.
 

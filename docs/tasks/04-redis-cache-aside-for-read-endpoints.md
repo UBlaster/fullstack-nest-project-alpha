@@ -40,7 +40,7 @@ Correctness доказывают функциональные тесты. Уск
 
 ## 3. Архитектура и файлы
 
-Добавьте `redis:7-bookworm` в Compose с AOF volume и healthcheck. Добавьте `ioredis`, настройки в `.env.example`, один `CacheModule`/`CacheService`, интеграцию в существующие Projects/Documents modules, `backend/test/cache.e2e-spec.ts` и `docs/infrastructure/04-redis-cache.md`.
+Добавьте `redis:7-bookworm` в Compose с AOF volume и healthcheck. Добавьте `ioredis`, настройки в `.env.example`, один `CacheModule`/`CacheService`, интеграцию в существующие Projects/Documents modules и `backend/test/cache.e2e-spec.ts`.
 
 Сохраняйте modular monolith:
 
@@ -51,6 +51,17 @@ Controller -> FeatureService -> AccessPolicyService
 ```
 
 `CacheModule` владеет единственным lifecycle-managed Redis client и экспортирует `CacheService`. Feature services не создают `new Redis()` и не получают raw client. Не добавляйте Repository, CQRS, event bus или новый search service ради cache.
+
+Project contract:
+
+- `CacheModule` объявляет `CACHE_CONFIG`, `REDIS_CLIENT` и `CacheService`; configuration, client и lifecycle имеют одного понятного владельца;
+- наружу экспортируется только `CacheService`, raw `REDIS_CLIENT` остаётся внутренней зависимостью;
+- feature services используют только публичный контракт `CacheService`: getters `projectsTtlSeconds`/`searchTtlSeconds`, `getWorkspaceVersion`, `projectsKey`, `searchKey`, `remember` и `invalidateWorkspace`;
+- `ProjectsService` и `DocumentsService` не инжектят и не вызывают raw Redis client;
+- private `read` различает доступность Redis и наличие value через `{ available, hit, value? }`;
+- lifecycle реализован в `CacheService`: при готовом client выполняется graceful `quit()` с timeout 500 ms, при error/timeout — `disconnect()`.
+
+Имена private helpers (`read`, `write`, `releaseLock`, `ensureConnected`) задают понятную декомпозицию, но задача проверяет их поведение, а не требует буквального копирования реализации.
 
 ## 4. Конфигурация
 
@@ -63,10 +74,14 @@ CACHE_LOCK_TTL_MS=5000
 ```
 
 - При включённом cache `REDIS_URL` обязателен.
+- `CACHE_ENABLED` принимает только `true`/`false`; отсутствие означает `false`, другое значение останавливает bootstrap.
 - TTL/lock timeout валидируются при bootstrap как положительные integers.
 - При `CACHE_ENABLED=false` оба reads идут прямо в PostgreSQL.
 - Backend не зависит от Redis readiness для старта: Redis — деградируемая оптимизация.
-- Client закрывается через Nest lifecycle hook.
+- Client использует `lazyConnect: true`, `enableOfflineQueue: false`, `enableReadyCheck: true`, `maxRetriesPerRequest: 1`, `connectTimeout: 500` и `retryStrategy: () => null`.
+- Конкурентные попытки подключения разделяют один promise; после ошибки действует cooldown 1000 ms, во время которого requests сразу идут в DB. Это предотвращает reconnect storm.
+- Повторяющиеся warnings одной Redis operation также throttled на 1000 ms; log содержит только operation и безопасные `Error.name`/`code`, но не key, payload, raw query или credentials.
+- Client закрывается через единственный Nest lifecycle hook.
 
 ## 5. Единственная разрешённая key schema
 
@@ -100,12 +115,12 @@ Role/userId не входят в data key, потому что текущий pa
 Для каждого endpoint:
 
 1. Проверить access с resource `project` или `document`.
-2. Прочитать workspace version; отсутствие означает `0`.
+2. Прочитать workspace version: отсутствие key при доступном Redis означает строку `"0"`; disabled/unavailable Redis возвращает `null` и немедленно включает DB path.
 3. Построить versioned data key.
-4. Вернуть валидный JSON hit.
+4. `read()` возвращает `available=false` при connect/GET failure и `available=true, hit=false` при обычном miss. Invalid JSON логируется отдельно, удаляется best-effort только по exact key и также становится miss.
 5. На miss выполнить stampede-safe loader.
 6. Loader вызывает прежний tenant-scoped Prisma/SQL path.
-7. Записать JSON с TTL и bounded jitter до ±10%.
+7. Записать JSON с положительным integer TTL и bounded jitter примерно ±10%; вычисление jitter вынести в маленький helper отдельно от основного `remember()` flow.
 8. Любую Redis connect/get/set/version/lock ошибку залогировать без payload и продолжить через DB.
 
 Повреждённый JSON — miss: удалить best-effort только точный key и загрузить source of truth. Cache layer не перехватывает auth/policy/validation/PostgreSQL errors и не превращает их в miss.
@@ -121,7 +136,7 @@ SET lockKey uniqueToken NX PX CACHE_LOCK_TTL_MS
 
 - Владелец lock делает second cache read, один DB load и SET с TTL/jitter.
 - Lock снимается compare-and-delete Lua script только при совпадении token.
-- Не-владелец выполняет не более трёх коротких bounded retries; затем идёт в DB без бесконечного ожидания.
+- Не-владелец выполняет три коротких bounded retries с паузами 75, 150 и 225 ms; при `available=false` немедленно идёт в DB, а после трёх обычных misses выполняет bounded fallback.
 - Lock всегда имеет expiry; token уникален для attempt.
 
 Запрещены обычный `DEL lockKey`, бессрочный lock, бесконечный polling и process-local mutex: первый может удалить чужой reacquired lock, остальные не защищают multi-instance backend.
@@ -157,6 +172,9 @@ Project list:
 ```text
 ProjectsService.listByWorkspace
 -> requireWorkspace(userId, workspaceId, 'view', 'project')
+-> getWorkspaceVersion(workspaceId)
+-> null: прежний project.findMany через DB
+-> version: projectsKey(workspaceId, version)
 -> remember(project key)
 -> прежний project.findMany({ where: { workspaceId }, include/orderBy без изменений })
 ```
@@ -168,6 +186,9 @@ Search:
 ```text
 DocumentsService.search
 -> requireWorkspace(userId, workspaceId, 'view', 'document')
+-> getWorkspaceVersion(workspaceId)
+-> null: прежний tenant-scoped search через DB
+-> version: searchKey(workspaceId, version, q/limit/offset)
 -> remember(search key from q/limit/offset)
 -> прежняя interactive transaction, set_config, parameterized trigram SQL и response mapping
 ```
@@ -176,7 +197,7 @@ Tenant filter остаётся внутри SQL. `ARCHIVED` documents продо
 
 ## 10. Real E2E-flow
 
-`backend/test/cache.e2e-spec.ts` использует реальный `AppModule`, HTTP server, Redis 7 и PostgreSQL 16; Redis client, `CacheService` и DB loader не mock-аются.
+`backend/test/cache.e2e-spec.ts` использует реальный `AppModule`, HTTP server, Redis 7 и PostgreSQL 16. Providers не заменяются mock-реализациями; точечные `jest.spyOn` допустимы для наблюдения DB loader и воспроизведения конкретной ошибки Redis GET/shutdown.
 
 Fixtures:
 
@@ -199,16 +220,19 @@ Fixtures:
 8. Outsider с JWT получает hidden `404` и не читает/не заполняет cache чужого workspace.
 9. При одинаковой phrase выдача основного workspace не содержит foreign fixture ни на miss, ни на hit.
 10. При остановленном Redis разрешённые OWNER/MEMBER/VIEWER reads идут в PostgreSQL с `200`; outsider остаётся `404`, no-JWT — `401`.
+11. Corrupted JSON удаляется только по exact key, соседний test-owned key сохраняется, а ответ заново заполняется из PostgreSQL.
+12. Синтетический/интеграционный `GET` failure не запускает cleanup; global Redis cleanup нигде не используется.
+13. Разные workspace, version, `q`, `limit` и `offset` дают разные keys; raw `q` в key отсутствует.
+14. Mutation одного workspace не изменяет version другого workspace.
+15. Закрытие Nest application завершает Redis client без открытого handle: ready client вызывает `quit()`, а ошибка graceful shutdown приводит к `disconnect()`.
 
 Не доказывайте hit временем. Проверяйте точный test-owned key/TTL и controlled probe либо test-only query counter вокруг реального Prisma provider. Concurrency test отправляет несколько simultaneous miss одного key и подтверждает один normal loader path или bounded fallback без deadlock.
 
-## 11. Документация и проверки
-
-В `docs/infrastructure/04-redis-cache.md` опишите endpoints, полную key schema, canonical params, TTL/jitter, invalidation matrix, Lua release, degraded mode и очистку только exact dev/test namespace.
+## 11. Проверки
 
 ```bash
 docker compose config
-docker compose up -d redis db db-init backend
+docker compose up -d redis postgres db-init backend
 docker compose ps
 docker compose exec redis redis-cli ping
 docker compose exec backend npm run format:check
@@ -216,9 +240,13 @@ docker compose exec backend npm run lint
 docker compose exec backend npm run build
 docker compose exec backend npm run test:e2e -- --runInBand cache.e2e-spec.ts
 docker compose exec backend npm run test:e2e -- --runInBand
+docker compose stop redis
+docker compose exec -e TASK4_REDIS_DOWN=true -e REDIS_URL=redis://127.0.0.1:6399 backend npm run test:e2e -- --runInBand --detectOpenHandles cache.e2e-spec.ts
+docker compose up -d redis
+docker compose exec redis redis-cli ping
 ```
 
-Остановите только Redis и повторите degraded-mode HTTP cases, затем запустите Redis обратно.
+Остановите только Redis и повторите degraded-mode HTTP cases, затем обязательно запустите Redis обратно и подтвердите `PONG`. Закрытый loopback endpoint в отдельном Jest process проверяет connect failure без долгоживущего Docker DNS lookup для уже остановленного service alias; production `REDIS_URL` при этом не меняется. Этот сценарий доказывает degraded mode и отсутствие connection storm, но не выдаёт восстановление cache в том же Nest process за уже проверенное поведение.
 
 ## 12. Не входит в задачу
 
@@ -232,12 +260,17 @@ docker compose exec backend npm run test:e2e -- --runInBand
 - RBAC, hidden `404`, tenant isolation, search и migrations сохранены.
 - OWNER/MEMBER/VIEWER читают и ищут; outsider получает `404`, no-JWT — `401`.
 - Policy выполняется до каждого cache operation, включая hit.
+- `CacheModule` экспортирует `CacheService`, но не raw Redis client; lifecycle имеет одного владельца.
 - Keys tenant-scoped, versioned и учитывают все параметры ответа.
 - Hit/miss эквивалентны исходному public shape и не содержат foreign data.
 - Все project/document mutations bump-ят version после DB success.
 - Stampede protection использует `SET NX PX`, second read, bounded retry и token-safe Lua release.
 - Нет global keys, `KEYS *`, небезопасного lock `DEL` или invalidation до commit.
 - Redis failure деградирует в PostgreSQL без обхода authorization.
+- GET failure не удаляет key; invalid JSON удаляет только exact key и затем перезаполняется через DB.
+- `getWorkspaceVersion()` различает `null` для disabled/unavailable cache и `"0"` для отсутствующего key в доступном Redis.
+- Connection promise/cooldown предотвращают reconnect storm, повторяющиеся logs throttled, а jitter остаётся отдельной bounded функцией.
+- Graceful shutdown ограничен по времени и имеет `disconnect()` fallback.
 - E2E использует real NestJS + Redis + PostgreSQL, владеет fixtures и не зависит от seed.
 - Correctness assertions не основаны на latency; performance исследуется отдельно.
 - Compose, format, lint, build, cache E2E и полный E2E проходят.
@@ -251,6 +284,9 @@ docker compose exec backend npm run test:e2e -- --runInBand
 - [ ] Version bump выполняется после DB success.
 - [ ] Stale loader не пишет в новую version.
 - [ ] Lock ограничен по времени и снимается своим token.
+- [ ] GET failure и invalid JSON имеют разные cleanup semantics.
+- [ ] Feature services используют `CacheService`, но не raw Redis client.
+- [ ] Connection cooldown, log throttling и shutdown fallback проверены.
 - [ ] Redis error не становится `500`.
 - [ ] Тесты не очищают чужие DB fixtures/Redis namespaces.
 - [ ] Hit/miss, invalidation, isolation, `401`, hidden `404` и degraded mode доказаны real E2E.

@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { DocumentStatus } from '@prisma/client';
 import { AccessPolicyService } from '../access/access-policy.service';
+import { CacheService } from '../cache/cache.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import { SearchDocumentsQueryDto } from './dto/search-documents-query.dto';
@@ -23,13 +24,14 @@ export class DocumentsService {
 	constructor(
 		private readonly prisma: PrismaService,
 		private readonly accessPolicy: AccessPolicyService,
+		private readonly cache: CacheService,
 	) {}
 
 	async search(userId: string, workspaceId: string, dto: SearchDocumentsQueryDto) {
 		await this.accessPolicy.requireWorkspace(userId, workspaceId, 'view', 'document');
-
-		const rows = await this.prisma.$transaction(async (transaction) => {
-			await transaction.$queryRaw`
+		const load = async () => {
+			const rows = await this.prisma.$transaction(async (transaction) => {
+				await transaction.$queryRaw`
 				SELECT
 					set_config(
 						'pg_trgm.similarity_threshold',
@@ -43,7 +45,7 @@ export class DocumentsService {
 					)
 			`;
 
-			return transaction.$queryRaw<SearchDocumentRow[]>`
+				return transaction.$queryRaw<SearchDocumentRow[]>`
 				SELECT
 					document."id",
 					document."projectId",
@@ -72,18 +74,23 @@ export class DocumentsService {
 					document."id" ASC
 				LIMIT ${dto.limit}
 				OFFSET ${dto.offset}
-			`;
-		});
+				`;
+			});
 
-		return rows.map((row) => ({
-			id: row.id,
-			projectId: row.projectId,
-			title: row.title,
-			status: row.status,
-			updatedAt: row.updatedAt,
-			author: { name: row.authorName },
-			score: row.score,
-		}));
+			return rows.map((row) => ({
+				id: row.id,
+				projectId: row.projectId,
+				title: row.title,
+				status: row.status,
+				updatedAt: row.updatedAt,
+				author: { name: row.authorName },
+				score: row.score,
+			}));
+		};
+		const version = await this.cache.getWorkspaceVersion(workspaceId);
+		if (version === null) return load();
+		const key = this.cache.searchKey(workspaceId, version, dto);
+		return this.cache.remember(key, this.cache.searchTtlSeconds, load);
 	}
 
 	async list(userId: string, projectId: string) {
@@ -113,8 +120,8 @@ export class DocumentsService {
 	}
 
 	async create(userId: string, projectId: string, dto: CreateDocumentDto) {
-		await this.accessPolicy.requireProject(userId, projectId, 'create', 'document');
-		return this.prisma.document.create({
+		const context = await this.accessPolicy.requireProject(userId, projectId, 'create', 'document');
+		const document = await this.prisma.document.create({
 			data: {
 				title: dto.title,
 				content: dto.content,
@@ -122,36 +129,44 @@ export class DocumentsService {
 				authorId: userId,
 			},
 		});
+		await this.cache.invalidateWorkspace(context.workspaceId);
+		return document;
 	}
 
 	async update(userId: string, documentId: string, dto: UpdateDocumentDto) {
-		await this.accessPolicy.requireDocument(userId, documentId, 'update');
+		const context = await this.accessPolicy.requireDocument(userId, documentId, 'update');
 
 		if (dto.title === undefined && dto.content === undefined) {
 			throw new BadRequestException('At least one field is required');
 		}
 
-		return this.prisma.document.update({
+		const document = await this.prisma.document.update({
 			where: { id: documentId },
 			data: {
 				title: dto.title,
 				content: dto.content,
 			},
 		});
+		await this.cache.invalidateWorkspace(context.project.workspaceId);
+		return document;
 	}
 
 	async archive(userId: string, documentId: string) {
-		await this.accessPolicy.requireDocument(userId, documentId, 'archive');
-		return this.prisma.document.update({
+		const context = await this.accessPolicy.requireDocument(userId, documentId, 'archive');
+		const document = await this.prisma.document.update({
 			where: { id: documentId },
 			data: { status: DocumentStatus.ARCHIVED },
 		});
+		await this.cache.invalidateWorkspace(context.project.workspaceId);
+		return document;
 	}
 
 	async remove(userId: string, documentId: string) {
-		await this.accessPolicy.requireDocument(userId, documentId, 'delete');
-		return this.prisma.document.delete({
+		const context = await this.accessPolicy.requireDocument(userId, documentId, 'delete');
+		const document = await this.prisma.document.delete({
 			where: { id: documentId },
 		});
+		await this.cache.invalidateWorkspace(context.project.workspaceId);
+		return document;
 	}
 }
