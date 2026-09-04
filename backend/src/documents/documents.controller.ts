@@ -1,7 +1,19 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import {
+	Body,
+	Controller,
+	Delete,
+	Get,
+	Param,
+	Patch,
+	Post,
+	Query,
+	Req,
+	UseGuards,
+} from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
 import { CreateDocumentDto } from './dto/create-document.dto';
+import { SearchDocumentsQueryDto } from './dto/search-documents-query.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { DocumentsService } from './documents.service';
 
@@ -9,6 +21,15 @@ import { DocumentsService } from './documents.service';
 @Controller()
 export class DocumentsController {
 	constructor(private readonly documentsService: DocumentsService) {}
+
+	@Get('workspaces/:workspaceId/documents/search')
+	search(
+		@Param('workspaceId') workspaceId: string,
+		@Query() dto: SearchDocumentsQueryDto,
+		@Req() request: AuthenticatedRequest,
+	) {
+		return this.documentsService.search(request.user.sub, workspaceId, dto);
+	}
 
 	@Get('projects/:projectId/documents')
 	list(@Param('projectId') projectId: string, @Req() request: AuthenticatedRequest) {

@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { ProjectStatus } from '@prisma/client';
 import { AccessPolicyService } from '../access/access-policy.service';
+import { CacheService } from '../cache/cache.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
@@ -10,6 +11,7 @@ export class ProjectsService {
 	constructor(
 		private readonly prisma: PrismaService,
 		private readonly accessPolicy: AccessPolicyService,
+		private readonly cache: CacheService,
 	) {}
 
 	list(userId: string) {
@@ -25,14 +27,19 @@ export class ProjectsService {
 
 	async listByWorkspace(userId: string, workspaceId: string) {
 		await this.accessPolicy.requireWorkspace(userId, workspaceId, 'view', 'project');
-		return this.prisma.project.findMany({
-			where: { workspaceId },
-			include: {
-				_count: { select: { documents: true } },
-				createdBy: { select: { name: true } },
-			},
-			orderBy: { updatedAt: 'desc' },
-		});
+		const load = () =>
+			this.prisma.project.findMany({
+				where: { workspaceId },
+				include: {
+					_count: { select: { documents: true } },
+					createdBy: { select: { name: true } },
+				},
+				orderBy: { updatedAt: 'desc' },
+			});
+		const version = await this.cache.getWorkspaceVersion(workspaceId);
+		if (version === null) return load();
+		const key = this.cache.projectsKey(workspaceId, version);
+		return this.cache.remember(key, this.cache.projectsTtlSeconds, load);
 	}
 
 	async get(userId: string, projectId: string) {
@@ -50,7 +57,7 @@ export class ProjectsService {
 
 	async create(userId: string, workspaceId: string, dto: CreateProjectDto) {
 		await this.accessPolicy.requireWorkspace(userId, workspaceId, 'create', 'project');
-		return this.prisma.project.create({
+		const project = await this.prisma.project.create({
 			data: {
 				name: dto.name,
 				description: dto.description,
@@ -58,36 +65,44 @@ export class ProjectsService {
 				createdById: userId,
 			},
 		});
+		await this.cache.invalidateWorkspace(workspaceId);
+		return project;
 	}
 
 	async update(userId: string, projectId: string, dto: UpdateProjectDto) {
-		await this.accessPolicy.requireProject(userId, projectId, 'update');
+		const context = await this.accessPolicy.requireProject(userId, projectId, 'update');
 
 		if (dto.name === undefined && dto.description === undefined) {
 			throw new BadRequestException('At least one field is required');
 		}
 
-		return this.prisma.project.update({
+		const project = await this.prisma.project.update({
 			where: { id: projectId },
 			data: {
 				name: dto.name,
 				description: dto.description,
 			},
 		});
+		await this.cache.invalidateWorkspace(context.workspaceId);
+		return project;
 	}
 
 	async archive(userId: string, projectId: string) {
-		await this.accessPolicy.requireProject(userId, projectId, 'archive');
-		return this.prisma.project.update({
+		const context = await this.accessPolicy.requireProject(userId, projectId, 'archive');
+		const project = await this.prisma.project.update({
 			where: { id: projectId },
 			data: { status: ProjectStatus.ARCHIVED },
 		});
+		await this.cache.invalidateWorkspace(context.workspaceId);
+		return project;
 	}
 
 	async remove(userId: string, projectId: string) {
-		await this.accessPolicy.requireProject(userId, projectId, 'delete');
-		return this.prisma.project.delete({
+		const context = await this.accessPolicy.requireProject(userId, projectId, 'delete');
+		const project = await this.prisma.project.delete({
 			where: { id: projectId },
 		});
+		await this.cache.invalidateWorkspace(context.workspaceId);
+		return project;
 	}
 }
