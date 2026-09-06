@@ -53,6 +53,10 @@ button {
 	border-radius: 8px;
 	border: 1px solid #ccd3df;
 }
+button:disabled {
+	opacity: 0.6;
+	cursor: wait;
+}
 input,
 textarea {
 	display: block;
@@ -96,4 +100,57 @@ button {
 }
 .doc span {
 	color: #687386;
+}
+.section-heading {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+}
+.section-heading h2 {
+	margin: 0;
+}
+.files-section {
+	margin-top: 28px;
+}
+.muted,
+.file-row span {
+	color: #687386;
+}
+.upload-progress {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	margin: 12px 0;
+}
+.upload-progress progress {
+	width: min(420px, 100%);
+}
+.file-list {
+	display: grid;
+	gap: 10px;
+	margin-top: 16px;
+}
+.file-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	padding: 12px 0;
+	border-top: 1px solid #e2e7ef;
+}
+.file-row strong,
+.file-row span {
+	display: block;
+}
+.file-actions {
+	display: flex;
+	flex-shrink: 0;
+}
+@media (max-width: 640px) {
+	.section-heading,
+	.file-row {
+		align-items: stretch;
+		flex-direction: column;
+	}
 }

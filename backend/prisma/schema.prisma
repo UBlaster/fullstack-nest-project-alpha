@@ -29,6 +29,13 @@ enum DocumentStatus {
   ARCHIVED
 }
 
+enum DocumentFileStatus {
+  PENDING
+  READY
+  DELETING
+  FAILED
+}
+
 model User {
   id          String            @id @default(cuid())
   email       String            @unique
@@ -42,11 +49,11 @@ model User {
 }
 
 model Workspace {
-  id        String          @id @default(cuid())
+  id        String            @id @default(cuid())
   name      String
-  status    WorkspaceStatus @default(ACTIVE)
-  createdAt DateTime        @default(now())
-  updatedAt DateTime        @updatedAt
+  status    WorkspaceStatus   @default(ACTIVE)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
   members   WorkspaceMember[]
   projects  Project[]
 }
@@ -91,7 +98,25 @@ model Document {
   updatedAt DateTime       @updatedAt
   project   Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
   author    User           @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  files     DocumentFile[]
 
   @@index([projectId])
   @@index([authorId])
+}
+
+model DocumentFile {
+  id           String             @id @default(cuid())
+  documentId   String
+  objectKey    String             @unique
+  originalName String
+  mimeType     String
+  size         Int
+  etag         String?
+  status       DocumentFileStatus @default(PENDING)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  document     Document           @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+  @@index([status, createdAt])
 }

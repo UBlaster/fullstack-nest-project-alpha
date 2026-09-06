@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { api } from '../../../shared/api';
+import { api, downloadAuthenticated } from '../../../shared/api';
 import { Layout } from '../../../widgets/layout';
 
 export function ProjectPage() {
@@ -13,17 +13,22 @@ export function ProjectPage() {
 	const [title, setTitle] = useState('');
 	const [content, setContent] = useState('');
 	const [error, setError] = useState<string | null>(null);
-	const load = () =>
-		api('/projects/' + id)
-			.then((data) => {
-				setProject(data);
-				setDocuments(data.documents);
-			})
-			.catch((error) => setError(error.message));
+	const [exportError, setExportError] = useState('');
+	const [isExporting, setIsExporting] = useState(false);
+	const load = useCallback(
+		() =>
+			api('/projects/' + id)
+				.then((data) => {
+					setProject(data);
+					setDocuments(data.documents);
+				})
+				.catch((error) => setError(error.message)),
+		[id],
+	);
 
 	useEffect(() => {
 		load();
-	}, [id]);
+	}, [load]);
 
 	useEffect(() => {
 		const query = searchQuery.trim();
@@ -80,7 +85,30 @@ export function ProjectPage() {
 			<Link to="/projects">← Проекты</Link>
 			<h1>{project.name}</h1>
 			<p>{project.description}</p>
-			<h2>Документы ({documents.length})</h2>
+			<div className="section-heading">
+				<h2>Документы ({documents.length})</h2>
+				<button
+					type="button"
+					disabled={isExporting}
+					onClick={async () => {
+						setIsExporting(true);
+						setExportError('');
+						try {
+							await downloadAuthenticated(
+								`/workspaces/${project.workspaceId}/documents/export.csv`,
+								'documents.csv',
+							);
+						} catch (error) {
+							setExportError(error instanceof Error ? error.message : 'Ошибка экспорта');
+						} finally {
+							setIsExporting(false);
+						}
+					}}
+				>
+					{isExporting ? 'Экспорт...' : 'Скачать CSV workspace'}
+				</button>
+			</div>
+			{exportError && <p className="error">{exportError}</p>}
 			<input
 				type="search"
 				placeholder="Поиск документов по заголовку"

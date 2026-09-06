@@ -10,7 +10,7 @@ function RootRedirect() {
 
 	useEffect(() => {
 		navigate(localStorage.getItem('token') ? '/projects' : '/login');
-	}, []);
+	}, [navigate]);
 
 	return null;
 }

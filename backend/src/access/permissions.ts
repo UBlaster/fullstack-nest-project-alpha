@@ -33,7 +33,15 @@ export function assertAllowed(
 	resource: AccessResource,
 	action: AccessAction,
 ): void {
-	if (!permissions[resource][action].includes(role)) {
+	if (!isAllowed(role, resource, action)) {
 		throw new ForbiddenException();
 	}
+}
+
+export function isAllowed(
+	role: WorkspaceRole,
+	resource: AccessResource,
+	action: AccessAction,
+): boolean {
+	return permissions[resource][action].includes(role);
 }

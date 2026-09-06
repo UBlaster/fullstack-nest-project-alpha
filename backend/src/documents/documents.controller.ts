@@ -8,10 +8,13 @@ import {
 	Post,
 	Query,
 	Req,
+	Res,
 	UseGuards,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { Response } from 'express';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
+import { DocumentsExportService } from './documents-export.service';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import { SearchDocumentsQueryDto } from './dto/search-documents-query.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
@@ -20,7 +23,19 @@ import { DocumentsService } from './documents.service';
 @UseGuards(AuthGuard('jwt'))
 @Controller()
 export class DocumentsController {
-	constructor(private readonly documentsService: DocumentsService) {}
+	constructor(
+		private readonly documentsService: DocumentsService,
+		private readonly documentsExport: DocumentsExportService,
+	) {}
+
+	@Get('workspaces/:workspaceId/documents/export.csv')
+	exportCsv(
+		@Param('workspaceId') workspaceId: string,
+		@Req() request: AuthenticatedRequest,
+		@Res() response: Response,
+	): Promise<void> {
+		return this.documentsExport.export(request.user.sub, workspaceId, request, response);
+	}
 
 	@Get('workspaces/:workspaceId/documents/search')
 	search(

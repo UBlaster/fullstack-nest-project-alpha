@@ -1,1 +1,1 @@
-export { api } from './client';
+export { api, downloadAuthenticated, uploadToPresignedUrl } from './client';

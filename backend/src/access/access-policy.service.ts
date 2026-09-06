@@ -79,7 +79,12 @@ export class AccessPolicyService {
 			throw new NotFoundException();
 		}
 
-		await this.requireMembership(userId, document.project.workspaceId, 'document', action);
-		return document;
+		const membership = await this.requireMembership(
+			userId,
+			document.project.workspaceId,
+			'document',
+			action,
+		);
+		return { ...document, workspaceRole: membership.role };
 	}
 }
