@@ -18,9 +18,31 @@
 - React 18.3, TypeScript, Vite, React Router;
 - NestJS 10.4, Prisma 6.19;
 - PostgreSQL 16;
+- Redis 7;
 - Docker Compose и Docker Dev Mode.
 
 Архитектура backend: `Controller → Service → Prisma`.
+
+## Что установить перед запуском
+
+- [Docker Desktop](https://docs.docker.com/desktop/) — обязателен. Он устанавливает Docker Engine и
+  Docker Compose, в которых запускаются все сервисы проекта. Инструкции для
+  [Windows](https://docs.docker.com/desktop/setup/install/windows-install/),
+  [macOS](https://docs.docker.com/desktop/setup/install/mac-install/) и
+  [Linux](https://docs.docker.com/desktop/setup/install/linux/).
+- [DBeaver Community](https://dbeaver.io/download/) — установите для просмотра и ручной
+  проверки PostgreSQL в учебных заданиях. DBeaver не участвует в запуске приложения,
+  поэтому для самого запуска он не обязателен.
+
+Отдельно устанавливать Node.js, npm, PostgreSQL и Redis не нужно: нужные версии уже заданы
+в Docker-образах проекта.
+
+Перед запуском проверьте, что Docker Desktop запущен и команды доступны:
+
+```bash
+docker --version
+docker compose version
+```
 
 ## Запуск
 
@@ -84,6 +106,17 @@ docker compose ps
 ## База данных
 
 Схема описана в `backend/prisma/schema.prisma`, а seed — в `backend/prisma/seed.ts`. Изменения структуры базы выполняются через Prisma migrations. Подробная инструкция находится в [DATABASE_MIGRATIONS.md](DATABASE_MIGRATIONS.md).
+
+Параметры подключения DBeaver к локальной базе после запуска Compose:
+
+- тип базы: PostgreSQL;
+- host: `localhost`;
+- port: `5432`;
+- database: `workspace_docs`;
+- username: `app`;
+- password: `app`.
+
+Эти параметры соответствуют значениям из корневого `.env.example`.
 
 Не коммитьте `.env`, secrets, `node_modules`, `dist` и данные PostgreSQL.
 
