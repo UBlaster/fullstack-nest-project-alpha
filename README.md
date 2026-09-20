@@ -25,14 +25,19 @@
 
 ## Что установить перед запуском
 
-- [Docker Desktop](https://docs.docker.com/desktop/) — обязателен. Он устанавливает Docker Engine и
-  Docker Compose, в которых запускаются все сервисы проекта. Инструкции для
+- [Docker Desktop](https://docs.docker.com/desktop/) — обязателен именно в виде desktop-приложения
+  с графическим интерфейсом. Через UI удобно смотреть состояние контейнеров, логи, образы и volumes.
+  Docker Desktop также устанавливает Docker Engine и Docker Compose, в которых запускаются все
+  сервисы проекта. Инструкции для
   [Windows](https://docs.docker.com/desktop/setup/install/windows-install/),
   [macOS](https://docs.docker.com/desktop/setup/install/mac-install/) и
   [Linux](https://docs.docker.com/desktop/setup/install/linux/).
 - [DBeaver Community](https://dbeaver.io/download/) — установите для просмотра и ручной
   проверки PostgreSQL в учебных заданиях. DBeaver не участвует в запуске приложения,
   поэтому для самого запуска он не обязателен.
+- [Redis Insight](https://redis.io/insight/) — официальный desktop-GUI для Redis. В нём можно
+  просматривать и фильтровать ключи, изучать структуры данных и выполнять команды.
+  [Инструкция по установке](https://redis.io/docs/latest/operate/redisinsight/install/).
 
 Отдельно устанавливать Node.js, npm, PostgreSQL и Redis не нужно: нужные версии уже заданы
 в Docker-образах проекта.
