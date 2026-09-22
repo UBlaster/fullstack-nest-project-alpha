@@ -36,6 +36,18 @@ enum DocumentFileStatus {
   FAILED
 }
 
+enum ExportJobStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum OutboxEventType {
+  EXPORT_REQUESTED
+}
+
 model User {
   id          String            @id @default(cuid())
   email       String            @unique
@@ -46,16 +58,18 @@ model User {
   memberships WorkspaceMember[]
   projects    Project[]
   documents   Document[]
+  exportJobs  ExportJob[]
 }
 
 model Workspace {
-  id        String            @id @default(cuid())
-  name      String
-  status    WorkspaceStatus   @default(ACTIVE)
-  createdAt DateTime          @default(now())
-  updatedAt DateTime          @updatedAt
-  members   WorkspaceMember[]
-  projects  Project[]
+  id         String            @id @default(cuid())
+  name       String
+  status     WorkspaceStatus   @default(ACTIVE)
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+  members    WorkspaceMember[]
+  projects   Project[]
+  exportJobs ExportJob[]
 }
 
 model WorkspaceMember {
@@ -119,4 +133,52 @@ model DocumentFile {
 
   @@index([documentId])
   @@index([status, createdAt])
+}
+
+model ExportJob {
+  id                String          @id
+  workspaceId       String
+  requestedById     String
+  status            ExportJobStatus @default(QUEUED)
+  filters           Json
+  queueJobId        String          @unique
+  objectKey         String?         @unique
+  progress          Int             @default(0)
+  attempts          Int             @default(0)
+  heartbeatAt       DateTime?
+  processingToken   String?
+  errorCode         String?
+  cancelRequestedAt DateTime?
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  expiresAt         DateTime?
+  expiredAt         DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  workspace         Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  requestedBy       User            @relation(fields: [requestedById], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, createdAt])
+  @@index([requestedById, createdAt])
+  @@index([status, heartbeatAt])
+  @@index([status, expiresAt])
+}
+
+model OutboxEvent {
+  id            String          @id @default(cuid())
+  type          OutboxEventType
+  aggregateId   String
+  payload       Json
+  availableAt   DateTime        @default(now())
+  claimedAt     DateTime?
+  claimToken    String?
+  publishedAt   DateTime?
+  attempts      Int             @default(0)
+  lastErrorCode String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  @@unique([type, aggregateId])
+  @@index([publishedAt, availableAt, createdAt])
+  @@index([claimedAt])
 }

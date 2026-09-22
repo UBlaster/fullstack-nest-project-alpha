@@ -7,6 +7,7 @@ import {
 	S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { Upload } from '@aws-sdk/lib-storage';
 import { Inject, Injectable, OnModuleDestroy } from '@nestjs/common';
 import {
 	ObjectHead,
@@ -72,6 +73,35 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 			}),
 			{ expiresIn: input.expiresInSeconds },
 		);
+	}
+
+	async uploadStream(input: {
+		objectKey: string;
+		body: import('node:stream').Readable;
+		contentType: string;
+		signal: AbortSignal;
+	}): Promise<void> {
+		const upload = new Upload({
+			client: this.s3,
+			params: {
+				Bucket: this.config.bucket,
+				Key: input.objectKey,
+				Body: input.body,
+				ContentType: input.contentType,
+			},
+			queueSize: 2,
+			partSize: 5 * 1024 * 1024,
+			leavePartsOnError: false,
+		});
+		const abort = () => {
+			void upload.abort();
+		};
+		input.signal.addEventListener('abort', abort, { once: true });
+		try {
+			await upload.done();
+		} finally {
+			input.signal.removeEventListener('abort', abort);
+		}
 	}
 
 	async head(objectKey: string): Promise<ObjectHead> {

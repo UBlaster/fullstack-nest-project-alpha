@@ -1,4 +1,5 @@
 import { InjectionToken } from '@nestjs/common';
+import { Readable } from 'node:stream';
 
 export const OBJECT_STORAGE: InjectionToken = Symbol('OBJECT_STORAGE');
 export const S3_CLIENT: InjectionToken = Symbol('S3_CLIENT');
@@ -27,6 +28,12 @@ export interface ObjectStorageService {
 		downloadName: string;
 		expiresInSeconds: number;
 	}): Promise<string>;
+	uploadStream(input: {
+		objectKey: string;
+		body: Readable;
+		contentType: string;
+		signal: AbortSignal;
+	}): Promise<void>;
 	head(objectKey: string): Promise<ObjectHead>;
 	remove(objectKey: string): Promise<void>;
 	list(prefix?: string): AsyncIterable<string>;

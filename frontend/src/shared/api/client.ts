@@ -43,6 +43,13 @@ export async function downloadAuthenticated(path: string, fileName: string): Pro
 	URL.revokeObjectURL(url);
 }
 
+export function downloadPresignedUrl(url: string): void {
+	const link = document.createElement('a');
+	link.href = url;
+	link.rel = 'noopener';
+	link.click();
+}
+
 export function uploadToPresignedUrl(
 	url: string,
 	file: File,

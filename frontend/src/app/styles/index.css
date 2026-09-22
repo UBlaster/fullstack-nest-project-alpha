@@ -107,6 +107,13 @@ button {
 	justify-content: space-between;
 	gap: 16px;
 }
+
+.export-status {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	margin-bottom: 12px;
+}
 .section-heading h2 {
 	margin: 0;
 }
