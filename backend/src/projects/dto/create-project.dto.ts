@@ -5,7 +5,7 @@ export class CreateProjectDto {
 	@Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
 	@IsString()
 	@Length(1, 120)
-	name!: string;
+	declare name: string;
 
 	@IsOptional()
 	@IsString()
