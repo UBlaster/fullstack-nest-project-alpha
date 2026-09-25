@@ -1,11 +1,11 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
-import { AuthGuard } from '@nestjs/passport';
-import { AuthenticatedRequest } from '../auth/authenticated-request';
-import { CreateWorkspaceDto } from './dto/create-workspace.dto';
-import { UpdateWorkspaceDto } from './dto/update-workspace.dto';
-import { WorkspacesService } from './workspaces.service';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Req } from '@nestjs/common';
+import { AuthenticatedRequest } from '../../auth/authenticated-request';
+import { JwtAuth } from '../../auth/decorators/jwt-auth.decorator';
+import { CreateWorkspaceDto } from '../dto/create-workspace.dto';
+import { UpdateWorkspaceDto } from '../dto/update-workspace.dto';
+import { WorkspacesService } from '../workspaces.service';
 
-@UseGuards(AuthGuard('jwt'))
+@JwtAuth()
 @Controller('workspaces')
 export class WorkspacesController {
 	constructor(private readonly workspacesService: WorkspacesService) {}

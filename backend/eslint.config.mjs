@@ -18,6 +18,14 @@ export default tseslint.config(
 			},
 		},
 		rules: {
+			'no-restricted-syntax': [
+				'error',
+				{
+					selector: 'ClassDeclaration[id.name=/Dto$/] PropertyDefinition[definite=true]',
+					message:
+						'DTO fields must not use definite assignment assertions; use declare for required fields.',
+				},
+			],
 			'@typescript-eslint/no-explicit-any': 'off',
 			'@typescript-eslint/no-unused-vars': [
 				'warn',

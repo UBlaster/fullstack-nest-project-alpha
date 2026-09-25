@@ -5,8 +5,8 @@ export class CreateDocumentDto {
 	@Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
 	@IsString()
 	@Length(1, 160)
-	title!: string;
+	declare title: string;
 
 	@IsString()
-	content!: string;
+	declare content: string;
 }
