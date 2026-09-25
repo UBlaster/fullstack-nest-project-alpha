@@ -46,6 +46,10 @@ export class QueueService implements OnModuleDestroy {
 		});
 	}
 
+	getFailed(start: number, end: number) {
+		return this.exportQueue.getFailed(start, end);
+	}
+
 	async onModuleDestroy(): Promise<void> {
 		await Promise.allSettled([this.exportQueue.close(), this.deadQueue.close()]);
 		if (this.connection.status === 'ready') {

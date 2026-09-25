@@ -85,8 +85,11 @@ export function ProjectPage() {
 		const poll = async () => {
 			try {
 				const current = await api(`/exports/${exportJobId}`, { signal: controller.signal });
+				if (stopped) return;
 				setExportJob((previous) =>
-					previous?.id === exportJobId ? { ...current, projectId: previous.projectId } : previous,
+					previous?.id === exportJobId && ['QUEUED', 'PROCESSING'].includes(previous.status)
+						? { ...current, projectId: previous.projectId }
+						: previous,
 				);
 			} catch (error) {
 				if (!controller.signal.aborted) {
@@ -112,7 +115,7 @@ export function ProjectPage() {
 		);
 	}
 
-	if (!project) {
+	if (!project || project.id !== id) {
 		return (
 			<Layout>
 				<p>Загрузка...</p>
@@ -171,7 +174,11 @@ export function ProjectPage() {
 									const cancelled = await api(`/exports/${activeExportJob.id}`, {
 										method: 'DELETE',
 									});
-									setExportJob({ ...cancelled, projectId: id });
+									setExportJob((previous) =>
+										previous?.id === activeExportJob.id
+											? { ...cancelled, projectId: id }
+											: previous,
+									);
 								} catch (error) {
 									setExportError(error instanceof Error ? error.message : 'Ошибка отмены экспорта');
 								}
@@ -183,7 +190,21 @@ export function ProjectPage() {
 					{activeExportJob.status === 'COMPLETED' && activeExportJob.downloadUrl && (
 						<button
 							type="button"
-							onClick={() => downloadPresignedUrl(activeExportJob.downloadUrl!)}
+							onClick={async () => {
+								try {
+									setExportError('');
+									// Polling stops at completion; the original signed URL may
+									// already be expired when the user clicks Download.
+									const current = await api(`/exports/${activeExportJob.id}`);
+									if (!current.downloadUrl)
+										throw new Error('Срок хранения экспорта истёк. Подготовьте новый CSV.');
+									downloadPresignedUrl(current.downloadUrl);
+								} catch (error) {
+									setExportError(
+										error instanceof Error ? error.message : 'Ошибка скачивания экспорта',
+									);
+								}
+							}}
 						>
 							Скачать готовый CSV
 						</button>

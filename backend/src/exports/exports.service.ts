@@ -53,23 +53,31 @@ export class ExportsService {
 	async cancel(userId: string, exportId: string) {
 		const job = await this.requireAccessibleJob(userId, exportId);
 		const now = new Date();
-		if (job.status === ExportJobStatus.QUEUED) {
+		while (true) {
 			await this.prisma.exportJob.updateMany({
-				where: { id: job.id, status: ExportJobStatus.QUEUED },
+				where: { id: job.id, status: ExportJobStatus.QUEUED, objectKey: null },
 				data: {
 					status: ExportJobStatus.CANCELLED,
 					cancelRequestedAt: now,
 					finishedAt: now,
 				},
 			});
-		} else if (job.status === ExportJobStatus.PROCESSING && !job.cancelRequestedAt) {
 			await this.prisma.exportJob.updateMany({
-				where: { id: job.id, status: ExportJobStatus.PROCESSING, cancelRequestedAt: null },
+				where: {
+					id: job.id,
+					status: { in: [ExportJobStatus.QUEUED, ExportJobStatus.PROCESSING] },
+					cancelRequestedAt: null,
+				},
 				data: { cancelRequestedAt: now },
 			});
+			const current = await this.prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
+			if (
+				current.cancelRequestedAt ||
+				(current.status !== ExportJobStatus.QUEUED && current.status !== ExportJobStatus.PROCESSING)
+			) {
+				return this.publicJob(current, true);
+			}
 		}
-		const current = await this.prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
-		return this.publicJob(current, false);
 	}
 
 	private async requireAccessibleJob(userId: string, exportId: string): Promise<ExportJob> {

@@ -10,6 +10,8 @@ export class ExportMaintenanceService {
 	private readonly staleAfterMs: number;
 	private recoveryTimer?: NodeJS.Timeout;
 	private retentionTimer?: NodeJS.Timeout;
+	private recoveryRun?: Promise<void>;
+	private retentionRun?: Promise<void>;
 
 	constructor(
 		private readonly prisma: PrismaService,
@@ -29,11 +31,12 @@ export class ExportMaintenanceService {
 		void this.retentionTick();
 	}
 
-	stop(): void {
+	async stop(): Promise<void> {
 		if (this.recoveryTimer) clearInterval(this.recoveryTimer);
 		if (this.retentionTimer) clearInterval(this.retentionTimer);
 		this.recoveryTimer = undefined;
 		this.retentionTimer = undefined;
+		await Promise.allSettled([this.recoveryRun, this.retentionRun]);
 	}
 
 	async recoverStale(now = new Date()): Promise<number> {
@@ -96,20 +99,53 @@ export class ExportMaintenanceService {
 		return removed;
 	}
 
-	private async recoveryTick(): Promise<void> {
-		try {
-			await this.recoverStale();
-		} catch (error) {
-			this.logger.warn(`Export recovery failed: ${this.errorName(error)}`);
+	async removeFailedAttempts(): Promise<number> {
+		const jobs = await this.prisma.exportJob.findMany({
+			where: {
+				status: { in: [ExportJobStatus.FAILED, ExportJobStatus.CANCELLED] },
+				objectKey: { not: null },
+			},
+			orderBy: [{ finishedAt: 'asc' }, { id: 'asc' }],
+			take: 100,
+		});
+		let removed = 0;
+		for (const job of jobs) {
+			if (!job.objectKey) continue;
+			await this.storage.remove(job.objectKey);
+			const result = await this.prisma.exportJob.updateMany({
+				where: { id: job.id, status: job.status, objectKey: job.objectKey },
+				data: { objectKey: null },
+			});
+			removed += result.count;
 		}
+		return removed;
 	}
 
-	private async retentionTick(): Promise<void> {
-		try {
-			await this.removeExpired();
-		} catch (error) {
-			this.logger.warn(`Export retention failed: ${this.errorName(error)}`);
-		}
+	private recoveryTick(): Promise<void> {
+		if (this.recoveryRun) return this.recoveryRun;
+		this.recoveryRun = this.recoverStale()
+			.then(() => {})
+			.catch((error: unknown) => {
+				this.logger.warn(`Export recovery failed: ${this.errorName(error)}`);
+			})
+			.finally(() => {
+				this.recoveryRun = undefined;
+			});
+		return this.recoveryRun;
+	}
+
+	private retentionTick(): Promise<void> {
+		if (this.retentionRun) return this.retentionRun;
+		this.retentionRun = this.removeExpired()
+			.then(() => this.removeFailedAttempts())
+			.then(() => {})
+			.catch((error: unknown) => {
+				this.logger.warn(`Export retention failed: ${this.errorName(error)}`);
+			})
+			.finally(() => {
+				this.retentionRun = undefined;
+			});
+		return this.retentionRun;
 	}
 
 	private errorName(error: unknown): string {

@@ -1,10 +1,14 @@
 import {
+	AbortMultipartUploadCommand,
+	CompleteMultipartUploadCommand,
+	CreateMultipartUploadCommand,
 	DeleteObjectCommand,
 	GetObjectCommand,
 	HeadObjectCommand,
 	ListObjectsV2Command,
 	PutObjectCommand,
 	S3Client,
+	UploadPartCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Upload } from '@aws-sdk/lib-storage';
@@ -81,8 +85,45 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 		contentType: string;
 		signal: AbortSignal;
 	}): Promise<void> {
+		const abortError = () =>
+			Object.assign(new Error('Export upload aborted'), { name: 'AbortError' });
+		if (input.signal.aborted) throw abortError();
+		let uploadId: string | undefined;
+		let multipartAborted = false;
+		// Upload.abort() races done() against an immediate rejection, not against
+		// settlement of the S3 requests. Abort requests directly and let done()
+		// join its bounded workers before the caller can delete the attempt object.
+		const client = new Proxy(this.s3, {
+			get: (target, property) => {
+				if (property !== 'send') return Reflect.get(target, property, target);
+				return async (
+					command:
+						| PutObjectCommand
+						| CreateMultipartUploadCommand
+						| UploadPartCommand
+						| CompleteMultipartUploadCommand
+						| AbortMultipartUploadCommand,
+				) => {
+					if (command instanceof AbortMultipartUploadCommand) {
+						const result = await target.send(command);
+						multipartAborted = true;
+						return result;
+					}
+					if (input.signal.aborted) throw abortError();
+					const options = { abortSignal: input.signal };
+					if (command instanceof CreateMultipartUploadCommand) {
+						const result = await target.send(command, options);
+						uploadId = result.UploadId;
+						return result;
+					}
+					if (command instanceof UploadPartCommand) return target.send(command, options);
+					if (command instanceof PutObjectCommand) return target.send(command, options);
+					return target.send(command, options);
+				};
+			},
+		});
 		const upload = new Upload({
-			client: this.s3,
+			client,
 			params: {
 				Bucket: this.config.bucket,
 				Key: input.objectKey,
@@ -94,11 +135,32 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 			leavePartsOnError: false,
 		});
 		const abort = () => {
-			void upload.abort();
+			input.body.destroy(abortError());
 		};
 		input.signal.addEventListener('abort', abort, { once: true });
 		try {
 			await upload.done();
+			if (input.signal.aborted) throw abortError();
+		} catch (error) {
+			// Upload does not abort the multipart session if its final Complete fails.
+			if (uploadId && !multipartAborted) {
+				try {
+					await this.s3.send(
+						new AbortMultipartUploadCommand({
+							Bucket: this.config.bucket,
+							Key: input.objectKey,
+							UploadId: uploadId,
+						}),
+					);
+				} catch (cleanupError) {
+					if (
+						!isNotFound(cleanupError) &&
+						!(cleanupError instanceof Error && cleanupError.name === 'NoSuchUpload')
+					)
+						throw cleanupError;
+				}
+			}
+			throw error;
 		} finally {
 			input.signal.removeEventListener('abort', abort);
 		}

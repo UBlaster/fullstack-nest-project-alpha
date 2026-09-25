@@ -1,13 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ExportJobStatus } from '@prisma/client';
-import { Worker } from 'bullmq';
+import { Job, Worker } from 'bullmq';
 import Redis from 'ioredis';
-import { ExportMaintenanceService } from './exports/export-maintenance.service';
-import { ExportProcessorService } from './exports/export-processor.service';
-import { PrismaService } from './prisma/prisma.service';
-import { ExportQueuePayload } from './queue/queue.constants';
-import { QueueService } from './queue/queue.service';
+import { ExportMaintenanceService } from './export-maintenance.service';
+import { ExportProcessorService } from './export-processor.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { ExportQueuePayload } from '../queue/queue.constants';
+import { QueueService } from '../queue/queue.service';
 
 @Injectable()
 export class WorkerRuntimeService {
@@ -17,6 +17,9 @@ export class WorkerRuntimeService {
 	private readonly pendingDeadLetters = new Set<Promise<void>>();
 	private connection?: Redis;
 	private worker?: Worker<ExportQueuePayload>;
+	private reconciliationTimer?: NodeJS.Timeout;
+	private reconciliation?: Promise<void>;
+	private failedCursor = 0;
 
 	constructor(
 		config: ConfigService,
@@ -43,23 +46,44 @@ export class WorkerRuntimeService {
 		});
 		this.worker.on('failed', (job) => {
 			if (job) {
-				const pending = this.publishDeadLetter(
-					job.id ?? job.data.exportJobId,
-					job.data.exportJobId,
-					job.attemptsMade,
-				);
+				const pending = this.publishDeadLetter(job);
 				this.pendingDeadLetters.add(pending);
 				void pending.finally(() => this.pendingDeadLetters.delete(pending));
 			}
 		});
 		this.maintenance.start();
+		this.reconciliationTimer = setInterval(() => void this.reconcileFailed(), 30_000);
+		this.reconciliationTimer.unref();
+		void this.reconcileFailed();
+	}
+
+	// Retained failed queue jobs provide durable retry evidence if the process
+	// dies between broker failure, the DB transition and DLQ publication.
+	reconcileFailed(): Promise<void> {
+		if (this.reconciliation) return this.reconciliation;
+		this.reconciliation = (async () => {
+			try {
+				const jobs = await this.queues.getFailed(this.failedCursor, this.failedCursor + 99);
+				for (const job of jobs) await this.publishDeadLetter(job);
+				this.failedCursor = jobs.length < 100 ? 0 : this.failedCursor + jobs.length;
+			} catch (error) {
+				this.logger.warn(
+					`Failed-job reconciliation failed: ${error instanceof Error ? error.name : 'UnknownError'}`,
+				);
+			}
+		})().finally(() => {
+			this.reconciliation = undefined;
+		});
+		return this.reconciliation;
 	}
 
 	async close(force = false): Promise<void> {
-		this.maintenance.stop();
+		if (this.reconciliationTimer) clearInterval(this.reconciliationTimer);
+		this.reconciliationTimer = undefined;
 		const worker = this.worker;
-		if (worker) await worker.close(force);
+		await Promise.all([worker?.close(force), this.maintenance.stop()]);
 		await Promise.allSettled([...this.pendingDeadLetters]);
+		await this.reconciliation;
 		this.worker = undefined;
 		if (this.connection) {
 			if (this.connection.status === 'ready') await this.connection.quit();
@@ -68,27 +92,31 @@ export class WorkerRuntimeService {
 		}
 	}
 
-	async forceClose(): Promise<void> {
-		this.maintenance.stop();
-		if (this.worker) await this.worker.close(true);
-		this.worker = undefined;
-		this.connection?.disconnect();
-		this.connection = undefined;
-	}
-
-	private async publishDeadLetter(
-		sourceQueueJobId: string,
-		exportJobId: string,
-		attempts: number,
-	): Promise<void> {
+	private async publishDeadLetter(queueJob: Job<ExportQueuePayload>): Promise<void> {
 		try {
+			if ((await queueJob.getState()) !== 'failed') return;
+			const exportJobId = queueJob.data.exportJobId;
+			const sourceQueueJobId = queueJob.id ?? exportJobId;
+			await this.prisma.exportJob.updateMany({
+				where: { id: exportJobId, queueJobId: sourceQueueJobId, status: ExportJobStatus.QUEUED },
+				data: {
+					status: ExportJobStatus.FAILED,
+					errorCode: 'RETRIES_EXHAUSTED',
+					finishedAt: new Date(),
+				},
+			});
 			const job = await this.prisma.exportJob.findUnique({
 				where: { id: exportJobId },
 				select: { status: true, errorCode: true },
 			});
 			if (job?.status !== ExportJobStatus.FAILED) return;
 			await this.queues.addDeadLetter(
-				createDeadLetterPayload(exportJobId, sourceQueueJobId, attempts, job.errorCode),
+				createDeadLetterPayload(
+					exportJobId,
+					sourceQueueJobId,
+					queueJob.attemptsMade,
+					job.errorCode,
+				),
 			);
 		} catch (error) {
 			const name = error instanceof Error ? error.name : 'UnknownError';

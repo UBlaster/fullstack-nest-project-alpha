@@ -2,26 +2,41 @@ import { Readable } from 'node:stream';
 import * as crypto from 'node:crypto';
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { ConfigService } from '@nestjs/config';
 import { ExportJobStatus, OutboxEventType, WorkspaceRole } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { Job } from 'bullmq';
+import { Job, Queue } from 'bullmq';
+import Redis from 'ioredis';
 import * as request from 'supertest';
 import { AppModule } from '../src/app.module';
-import { ExportMaintenanceService } from '../src/exports/export-maintenance.service';
-import {
-	ExportProcessorService,
-	shouldUpdateExportProgress,
-} from '../src/exports/export-processor.service';
+import { ExportMaintenanceService } from '../src/worker/export-maintenance.service';
+import { ExportProcessorService } from '../src/worker/export-processor.service';
+import { DocumentsExportService } from '../src/documents/documents-export.service';
 import { ExportsService } from '../src/exports/exports.service';
 import { OutboxDispatcherService } from '../src/outbox/outbox-dispatcher.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { ExportDeadLetterPayload, ExportQueuePayload } from '../src/queue/queue.constants';
 import { QueueService } from '../src/queue/queue.service';
-import { OBJECT_STORAGE, ObjectStorageService } from '../src/storage/storage.tokens';
+import {
+	OBJECT_STORAGE,
+	ObjectStorageService,
+	S3_CLIENT,
+	STORAGE_CONFIG,
+} from '../src/storage/storage.tokens';
 import { createAppValidationPipe } from '../src/validation.pipe';
-import { createDeadLetterPayload } from '../src/worker-runtime.service';
+import {
+	createDeadLetterPayload,
+	WorkerRuntimeService,
+} from '../src/worker/worker-runtime.service';
 
 const password = 'password123';
+function deferred() {
+	let resolve!: () => void;
+	const promise = new Promise<void>((done) => {
+		resolve = done;
+	});
+	return { promise, resolve };
+}
 const runId = `task6-e2e-${process.pid}-${Date.now()}`;
 const ids = {
 	workspace: `${runId}-workspace`,
@@ -77,8 +92,10 @@ class FakeStorage implements ObjectStorageService {
 	failNextUpload = false;
 	failNextRemove = false;
 	private uploadGate?: { promise: Promise<void>; release: () => void };
+	uploadAtGate = deferred();
 
 	holdNextUpload() {
+		this.uploadAtGate = deferred();
 		let release: () => void = () => {};
 		const promise = new Promise<void>((resolve) => {
 			release = resolve;
@@ -112,6 +129,7 @@ class FakeStorage implements ObjectStorageService {
 		const gate = this.uploadGate;
 		this.uploadGate = undefined;
 		if (gate) {
+			this.uploadAtGate.resolve();
 			let abort: (() => void) | undefined;
 			const aborted = new Promise<never>((_resolve, reject) => {
 				abort = () => reject(new Error('AbortError'));
@@ -165,8 +183,69 @@ describe('Task 6 background exports (e2e)', () => {
 	let viewerToken: string;
 	let outsiderToken: string;
 	const exportIds = new Set<string>();
+	const originalHeartbeat = process.env.EXPORT_HEARTBEAT_THROTTLE_MS;
+	afterEach(() => jest.restoreAllMocks());
 
 	const auth = (token: string) => ({ Authorization: `Bearer ${token}` });
+	const until = async (check: () => Promise<boolean>) => {
+		const deadline = Date.now() + 5000;
+		while (!(await check())) {
+			if (Date.now() >= deadline) throw new Error('Timed out waiting for queue state');
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+	};
+	const withRealQueue = async (
+		name: string,
+		run: (context: {
+			queues: QueueService;
+			config: ConfigService;
+			runtime: WorkerRuntimeService;
+			inspect: Queue<ExportQueuePayload>;
+			dead: Queue;
+		}) => Promise<void>,
+	) => {
+		const config = new ConfigService();
+		const queueName = `${runId}-${name}`;
+		const values: Record<string, string> = {
+			REDIS_URL: process.env.REDIS_URL!,
+			EXPORT_QUEUE_NAME: queueName,
+			EXPORT_DLQ_NAME: `${queueName}-dead`,
+		};
+		jest.spyOn(config, 'get').mockImplementation((key: string) => values[key]);
+		const connection = new Redis(values.REDIS_URL, { maxRetriesPerRequest: 1 });
+		const inspect = new Queue<ExportQueuePayload>(queueName, { connection });
+		const dead = new Queue(`${queueName}-dead`, { connection });
+		const queues = new QueueService(config);
+		const isolatedMaintenance = new ExportMaintenanceService(prisma, storage, config);
+		jest.spyOn(isolatedMaintenance, 'start').mockImplementation(() => {});
+		const runtime = new WorkerRuntimeService(
+			config,
+			processor,
+			isolatedMaintenance,
+			prisma,
+			queues,
+		);
+		try {
+			await run({ queues, config, runtime, inspect, dead });
+		} finally {
+			await runtime.close();
+			// Each queue name belongs exclusively to this run; remove exact IDs only.
+			for (const fixtureQueue of [inspect, dead]) {
+				const jobs = await fixtureQueue.getJobs([
+					'wait',
+					'active',
+					'delayed',
+					'completed',
+					'failed',
+				]);
+				expect(jobs.length).toBeLessThanOrEqual(2);
+				for (const job of jobs) await job.remove();
+			}
+			await queues.onModuleDestroy();
+			await Promise.all([inspect.close(), dead.close()]);
+			await connection.quit();
+		}
+	};
 	const queueJob = (exportJobId: string, attemptsMade = 0) =>
 		({
 			data: { exportJobId, schemaVersion: 1 },
@@ -216,16 +295,30 @@ describe('Task 6 background exports (e2e)', () => {
 		const moduleFixture = await Test.createTestingModule({ imports: [AppModule] })
 			.overrideProvider(QueueService)
 			.useValue(queue)
+			.overrideProvider(S3_CLIENT)
+			.useValue({ destroy: () => {} })
+			.overrideProvider(STORAGE_CONFIG)
+			.useValue({ bucket: 'task6-test', uploadTtlSeconds: 600, downloadTtlSeconds: 300 })
 			.overrideProvider(OBJECT_STORAGE)
 			.useValue(storage)
 			.compile();
 		app = moduleFixture.createNestApplication();
 		app.useGlobalPipes(createAppValidationPipe());
+		// Prevent the real timer from dispatching unrelated DB rows during setup.
+		jest
+			.spyOn(moduleFixture.get(OutboxDispatcherService), 'onModuleInit')
+			.mockImplementation(() => {});
 		await app.init();
 		prisma = app.get(PrismaService);
 		exportsService = app.get(ExportsService);
-		processor = app.get(ExportProcessorService);
-		maintenance = app.get(ExportMaintenanceService);
+		const config = app.get(ConfigService);
+		processor = new ExportProcessorService(
+			prisma,
+			app.get(DocumentsExportService),
+			storage,
+			config,
+		);
+		maintenance = new ExportMaintenanceService(prisma, storage, config);
 		dispatcher = app.get(OutboxDispatcherService);
 		dispatcher.onModuleDestroy();
 
@@ -296,6 +389,8 @@ describe('Task 6 background exports (e2e)', () => {
 			await prisma.user.deleteMany({ where: { email: { in: Object.values(emails) } } });
 		}
 		if (app) await app.close();
+		if (originalHeartbeat === undefined) delete process.env.EXPORT_HEARTBEAT_THROTTLE_MS;
+		else process.env.EXPORT_HEARTBEAT_THROTTLE_MS = originalHeartbeat;
 	});
 
 	it('returns 202 quickly and atomically creates ExportJob plus OutboxEvent', async () => {
@@ -330,7 +425,7 @@ describe('Task 6 background exports (e2e)', () => {
 	});
 
 	it('rolls back ExportJob when the matching outbox insert fails', async () => {
-		const exportId = '00000000-0000-4000-8000-000000000006';
+		const exportId = crypto.randomUUID();
 		exportIds.add(exportId);
 		await prisma.outboxEvent.create({
 			data: {
@@ -426,6 +521,104 @@ describe('Task 6 background exports (e2e)', () => {
 		});
 	});
 
+	it('does not lose cancel when QUEUED is claimed between read and update', async () => {
+		const job = await createDirectJob('cancel-claim-race');
+		jest
+			.spyOn(prisma.exportJob, 'findUnique')
+			.mockImplementationOnce(
+				() =>
+					processor.claim(job).then(() => job) as ReturnType<typeof prisma.exportJob.findUnique>,
+			);
+		const cancelled = await exportsService.cancel(ownerId, job.id);
+		expect(cancelled.status).toBe('PROCESSING');
+		expect(cancelled.cancelRequestedAt).not.toBeNull();
+	});
+
+	it('never acknowledges a delivery while the DB job is still PROCESSING', async () => {
+		const job = await createDirectJob('active-redelivery');
+		await processor.claim(job);
+		await expect(processor.process(queueJob(job.id))).rejects.toThrow();
+	});
+
+	it('uses the broker retry budget even when earlier deliveries failed before DB claim', async () => {
+		const job = await createDirectJob('broker-budget');
+		storage.failNextUpload = true;
+		await expect(processor.process(queueJob(job.id, 4))).rejects.toThrow();
+		const failed = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
+		expect(failed.status).toBe('FAILED');
+		expect(failed.errorCode).toBe('RETRIES_EXHAUSTED');
+	});
+
+	it('keeps the winning file when an old attempt loses its lease after upload', async () => {
+		const job = await createDirectJob('winner-file');
+		const entered = deferred();
+		const release = deferred();
+		const upload = jest.spyOn(storage, 'uploadStream').mockImplementationOnce(async (input) => {
+			for await (const chunk of input.body) {
+				expect(chunk.length).toBeGreaterThan(0);
+			}
+			entered.resolve();
+			await release.promise;
+			storage.objects.set(input.objectKey, Buffer.from('old attempt'));
+		});
+		const old = processor.process(queueJob(job.id)).catch((error: unknown) => error);
+		try {
+			await entered.promise;
+			await prisma.exportJob.update({
+				where: { id: job.id },
+				data: {
+					status: ExportJobStatus.QUEUED,
+					processingToken: null,
+					heartbeatAt: null,
+				},
+			});
+			await processor.process(queueJob(job.id, 1));
+			const winner = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
+			expect(winner.status).toBe('COMPLETED');
+			const winningBytes = storage.objects.get(winner.objectKey!);
+			release.resolve();
+			expect(await old).toBeInstanceOf(Error);
+			expect(storage.objects.get(winner.objectKey!)).toEqual(winningBytes);
+		} finally {
+			release.resolve();
+			await old;
+			upload.mockRestore();
+		}
+	});
+
+	it('waits for an in-flight upload to settle before cleaning a failed producer', async () => {
+		const job = await createDirectJob('settle-before-cleanup');
+		const entered = deferred();
+		const release = deferred();
+		const actualFind = prisma.exportJob.findUnique.bind(prisma.exportJob);
+		jest.spyOn(prisma.exportJob, 'findUnique').mockImplementation((args) => {
+			if (args.select)
+				return entered.promise.then(() => {
+					throw new Error('page check failed');
+				}) as ReturnType<typeof prisma.exportJob.findUnique>;
+			return actualFind(args);
+		});
+		jest.spyOn(storage, 'uploadStream').mockImplementationOnce(async (input) => {
+			entered.resolve();
+			await release.promise;
+			storage.objects.set(input.objectKey, Buffer.from('late upload'));
+		});
+		const remove = jest.spyOn(storage, 'remove');
+		let settled = false;
+		const processing = processor.process(queueJob(job.id)).catch(() => {
+			settled = true;
+		});
+		try {
+			await entered.promise;
+			await new Promise((resolve) => setTimeout(resolve, 60));
+			expect(settled).toBe(false);
+			expect(remove).not.toHaveBeenCalled();
+		} finally {
+			release.resolve();
+			await processing;
+		}
+	});
+
 	it('re-checks membership in the worker and fails permanently before storage', async () => {
 		const job = await createDirectJob('revoked-member', memberId);
 		await prisma.workspaceMember.delete({
@@ -446,10 +639,22 @@ describe('Task 6 background exports (e2e)', () => {
 
 	it('streams the Task 5 CSV shape and stores the object before COMPLETED', async () => {
 		const job = await createDirectJob('successful-stream');
-		await processor.process(queueJob(job.id));
+		const release = storage.holdNextUpload();
+		const processing = processor.process(queueJob(job.id));
+		try {
+			await storage.uploadAtGate.promise;
+			const pending = await exportsService.get(ownerId, job.id);
+			expect(pending.status).toBe('PROCESSING');
+			expect(pending.downloadUrl).toBeNull();
+		} finally {
+			release();
+			await processing;
+		}
 		const completed = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
 		expect(completed).toMatchObject({ status: ExportJobStatus.COMPLETED, progress: 100 });
-		expect(completed.objectKey).toBe(`workspaces/${ids.workspace}/exports/${job.id}.csv`);
+		expect(completed.objectKey).toMatch(
+			new RegExp(`^workspaces/${ids.workspace}/exports/${job.id}/.+\\.csv$`),
+		);
 		const csv = storage.objects.get(completed.objectKey!)?.toString('utf8');
 		expect(csv).toContain('\uFEFFid,projectId,title,status,authorName,updatedAt\r\n');
 		expect(csv).toContain('"Comma, quote "" and\nnewline"');
@@ -612,16 +817,12 @@ describe('Task 6 background exports (e2e)', () => {
 		const job = await createDirectJob('active-cancel');
 		storage.holdNextUpload();
 		const processing = processor.process(queueJob(job.id));
-		for (let attempt = 0; attempt < 50; attempt += 1) {
-			const state = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
-			if (state.status === ExportJobStatus.PROCESSING) break;
-			await new Promise((resolve) => setTimeout(resolve, 5));
-		}
+		await storage.uploadAtGate.promise;
 		await exportsService.cancel(ownerId, job.id);
 		await processing;
 		const cancelled = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
 		expect(cancelled.status).toBe(ExportJobStatus.CANCELLED);
-		const key = `workspaces/${ids.workspace}/exports/${job.id}.csv`;
+		const key = storage.uploadKeys.at(-1)!;
 		expect(storage.objects.has(key)).toBe(false);
 		expect(storage.removedKeys).toContain(key);
 		const repeated = await exportsService.cancel(ownerId, job.id);
@@ -649,7 +850,7 @@ describe('Task 6 background exports (e2e)', () => {
 		});
 		releaseUpload();
 		await expect(processing).rejects.toThrow('lease lost');
-		const key = `workspaces/${ids.workspace}/exports/${job.id}.csv`;
+		const key = storage.uploadKeys.at(-1)!;
 		expect(storage.removedKeys).toContain(key);
 		expect(storage.objects.has(key)).toBe(false);
 	});
@@ -666,6 +867,57 @@ describe('Task 6 background exports (e2e)', () => {
 			errorCode: 'STORAGE_UNAVAILABLE',
 			processingToken: null,
 		});
+		const abandonedKey = queued.objectKey!;
+		storage.objects.set(abandonedKey, Buffer.from('abandoned attempt'));
+		await processor.process(queueJob(job.id, 1));
+		expect(storage.objects.has(abandonedKey)).toBe(false);
+		const completed = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
+		expect(completed.status).toBe('COMPLETED');
+		expect(completed.objectKey).not.toBe(abandonedKey);
+		expect(storage.objects.has(completed.objectKey!)).toBe(true);
+	});
+
+	it('retries terminal attempt cleanup without changing FAILED or touching completed files', async () => {
+		const job = await createDirectJob('failed-cleanup');
+		storage.failNextUpload = true;
+		storage.failNextRemove = true;
+		await expect(processor.process(queueJob(job.id, 4))).rejects.toThrow(
+			'temporary cleanup failure',
+		);
+		const failed = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
+		expect(failed.status).toBe('FAILED');
+		storage.objects.set(failed.objectKey!, Buffer.from('failed attempt'));
+		const unrelatedKeys = [...storage.objects.keys()].filter((key) => key !== failed.objectKey);
+		await maintenance.removeFailedAttempts();
+		expect(storage.objects.has(failed.objectKey!)).toBe(false);
+		for (const key of unrelatedKeys) expect(storage.objects.has(key)).toBe(true);
+		expect(await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({
+			status: 'FAILED',
+			objectKey: null,
+		});
+	});
+
+	it('does not overlap maintenance ticks and waits for them before shutdown', async () => {
+		const release = deferred();
+		const recover = jest.spyOn(maintenance, 'recoverStale').mockImplementation(async () => {
+			await release.promise;
+			return 0;
+		});
+		jest.spyOn(maintenance, 'removeExpired').mockResolvedValue(0);
+		maintenance.start();
+		maintenance.start();
+		let stopped = false;
+		const stopping = maintenance.stop().then(() => {
+			stopped = true;
+		});
+		try {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(recover).toHaveBeenCalledTimes(1);
+			expect(stopped).toBe(false);
+		} finally {
+			release.resolve();
+			await stopping;
+		}
 	});
 
 	it('recovers only stale processing leases and rejects the old token', async () => {
@@ -740,9 +992,39 @@ describe('Task 6 background exports (e2e)', () => {
 		expect(expired.downloadUrl).toBeNull();
 	});
 
-	it('throttles heartbeat/progress and creates sanitized DLQ metadata', () => {
-		expect(shouldUpdateExportProgress(10_000, 11_999, 2_000)).toBe(false);
-		expect(shouldUpdateExportProgress(10_000, 12_000, 2_000)).toBe(true);
+	it('persists heartbeat while upload is pending, at most once per throttle interval', async () => {
+		const job = await createDirectJob('real-heartbeat');
+		const config = new ConfigService();
+		jest
+			.spyOn(config, 'get')
+			.mockImplementation((name) => (name === 'EXPORT_HEARTBEAT_THROTTLE_MS' ? 2000 : undefined));
+		const slowProcessor = new ExportProcessorService(
+			prisma,
+			app.get(DocumentsExportService),
+			storage,
+			config,
+		);
+		const release = storage.holdNextUpload();
+		const update = jest.spyOn(prisma.exportJob, 'updateMany');
+		const processing = slowProcessor.process(queueJob(job.id));
+		try {
+			await storage.uploadAtGate.promise;
+			await new Promise((resolve) => setTimeout(resolve, 2100));
+			const heartbeats = update.mock.calls.filter(
+				([args]) => args.data.progress !== undefined && args.data.heartbeatAt,
+			);
+			expect(heartbeats).toHaveLength(1);
+			expect(heartbeats[0][0].where?.processingToken).toEqual(expect.any(String));
+			const active = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
+			expect(active.status).toBe('PROCESSING');
+			expect(active.heartbeatAt!.getTime()).toBeGreaterThan(active.startedAt!.getTime());
+		} finally {
+			release();
+			await processing;
+		}
+	});
+
+	it('creates sanitized DLQ metadata', () => {
 		const payload = createDeadLetterPayload('export-id', 'queue-id', 5, 'RETRIES_EXHAUSTED');
 		expect(payload).toEqual({
 			exportJobId: 'export-id',
@@ -753,5 +1035,136 @@ describe('Task 6 background exports (e2e)', () => {
 		expect(payload).not.toHaveProperty('message');
 		expect(payload).not.toHaveProperty('stack');
 		expect(payload).not.toHaveProperty('objectKey');
+	});
+
+	it('keeps queued jobs across producer restart, deduplicates IDs, and drains active work on close', async () => {
+		await withRealQueue('restart', async ({ config, runtime, inspect }) => {
+			const job = await createDirectJob('queue-restart');
+			const producer = new QueueService(config);
+			try {
+				await producer.addExport({ exportJobId: job.id, schemaVersion: 1 }, job.queueJobId);
+				await producer.addExport({ exportJobId: job.id, schemaVersion: 1 }, job.queueJobId);
+			} finally {
+				await producer.onModuleDestroy();
+			}
+			expect(await inspect.getWaitingCount()).toBe(1);
+			const persisted = await inspect.getJob(job.queueJobId);
+			expect(persisted?.opts).toMatchObject({
+				attempts: 5,
+				backoff: { type: 'exponential', delay: 5000 },
+			});
+			const release = storage.holdNextUpload();
+			runtime.start();
+			await storage.uploadAtGate.promise;
+			let closed = false;
+			const closing = runtime.close().then(() => {
+				closed = true;
+			});
+			try {
+				await new Promise((resolve) => setTimeout(resolve, 40));
+				expect(closed).toBe(false);
+				expect(await persisted!.getState()).toBe('active');
+			} finally {
+				release();
+				await closing;
+			}
+			expect(await persisted!.getState()).toBe('completed');
+			expect((await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe(
+				'COMPLETED',
+			);
+		});
+	});
+
+	it('real BullMQ retries five times then publishes one sanitized DLQ job', async () => {
+		await withRealQueue('retry-dlq', async ({ runtime, inspect, dead }) => {
+			const job = await createDirectJob('real-retry-dlq');
+			const upload = jest
+				.spyOn(storage, 'uploadStream')
+				.mockRejectedValue(new Error('private S3 message'));
+			await inspect.add(
+				'build-export',
+				{ exportJobId: job.id, schemaVersion: 1 },
+				{ jobId: job.queueJobId, attempts: 5, backoff: { type: 'fixed', delay: 10 } },
+			);
+			runtime.start();
+			await until(async () => !!(await dead.getJob(`dead-${job.queueJobId}`)));
+			await runtime.close();
+			expect(upload).toHaveBeenCalledTimes(5);
+			expect(await inspect.getJob(job.queueJobId).then((value) => value!.getState())).toBe(
+				'failed',
+			);
+			expect((await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe(
+				'FAILED',
+			);
+			expect((await dead.getJob(`dead-${job.queueJobId}`))!.data).toEqual({
+				exportJobId: job.id,
+				sourceQueueJobId: job.queueJobId,
+				attempts: 5,
+				errorCode: 'RETRIES_EXHAUSTED',
+			});
+		});
+	});
+
+	it('delays a live DB lease without ACK or consuming a BullMQ attempt', async () => {
+		await withRealQueue('lease-delay', async ({ queues, runtime, inspect }) => {
+			const job = await createDirectJob('real-lease-delay');
+			await processor.claim(job);
+			const queued = await queues.addExport(
+				{ exportJobId: job.id, schemaVersion: 1 },
+				job.queueJobId,
+			);
+			runtime.start();
+			await until(async () => (await queued.getState()) === 'delayed');
+			await runtime.close();
+			expect((await inspect.getJob(job.queueJobId))!.attemptsMade).toBe(0);
+			expect((await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe(
+				'PROCESSING',
+			);
+		});
+	});
+
+	it('reconciles an exhausted queue job when the final DB read failed before claim', async () => {
+		await withRealQueue('read-failure', async ({ runtime, inspect, dead }) => {
+			const job = await createDirectJob('real-read-failure');
+			jest
+				.spyOn(prisma.exportJob, 'findUnique')
+				.mockRejectedValueOnce(new Error('temporary DB read failure'));
+			await inspect.add(
+				'build-export',
+				{ exportJobId: job.id, schemaVersion: 1 },
+				{ jobId: job.queueJobId, attempts: 1 },
+			);
+			runtime.start();
+			await until(async () => !!(await dead.getJob(`dead-${job.queueJobId}`)));
+			expect((await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe(
+				'FAILED',
+			);
+		});
+	}, 10000);
+
+	it('repairs a missed DLQ publication from the retained failed queue job idempotently', async () => {
+		await withRealQueue('dlq-repair', async ({ queues, runtime, inspect, dead }) => {
+			const job = await createDirectJob('real-dlq-repair');
+			jest.spyOn(storage, 'uploadStream').mockRejectedValue(new Error('private storage detail'));
+			const publish = jest
+				.spyOn(queues, 'addDeadLetter')
+				.mockRejectedValueOnce(new Error('temporary Redis failure'));
+			const queued = await inspect.add(
+				'build-export',
+				{ exportJobId: job.id, schemaVersion: 1 },
+				{ jobId: job.queueJobId, attempts: 1 },
+			);
+			runtime.start();
+			await until(
+				async () => (await queued.getState()) === 'failed' && publish.mock.calls.length > 0,
+			);
+			await runtime.close();
+			await runtime.reconcileFailed();
+			await runtime.reconcileFailed();
+			expect(await dead.getWaitingCount()).toBe(1);
+			expect((await dead.getJob(`dead-${job.queueJobId}`))!.data.errorCode).toBe(
+				'RETRIES_EXHAUSTED',
+			);
+		});
 	});
 });

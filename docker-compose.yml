@@ -97,6 +97,7 @@ services:
     command: ["sh", "-c", "npx prisma generate && npm run start:dev"]
     depends_on: { db-init: { condition: service_completed_successfully } }
   worker:
+    stop_grace_period: 35s
     build:
       context: ./backend
       dockerfile: Dockerfile.dev
@@ -127,7 +128,7 @@ services:
       [
         "sh",
         "-c",
-        "npx prisma generate && exec ./node_modules/.bin/ts-node src/worker.ts",
+        "npx prisma generate && exec ./node_modules/.bin/ts-node src/worker/worker.ts",
       ]
     healthcheck:
       test: ["CMD", "node", "-e", "process.kill(1, 0)"]
