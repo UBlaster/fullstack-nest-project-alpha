@@ -28,7 +28,7 @@ export class SearchDocumentsQueryDto {
 	@Transform(trimString)
 	@IsString()
 	@Length(2, 100)
-	q!: string;
+	declare q: string;
 
 	@Transform(parseNumber(defaultLimit))
 	@IsInt()
