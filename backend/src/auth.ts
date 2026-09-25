@@ -19,11 +19,11 @@ import { PrismaService } from './prisma.service';
 class LoginDto {
 	@IsEmail()
 	@IsNotEmpty()
-	email!: string;
+	declare email: string;
 
 	@IsString()
 	@IsNotEmpty()
-	password!: string;
+	declare password: string;
 }
 
 @Injectable()
