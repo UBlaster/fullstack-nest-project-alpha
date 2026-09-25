@@ -1,27 +1,15 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
+import { ProjectAccessService } from './project-access.service';
 
 @Injectable()
 export class ProjectsService {
-	constructor(private readonly prisma: PrismaService) {}
-
-	async ensureProjectAccess(id: string, userId: string) {
-		const project = await this.prisma.project.findUnique({ where: { id } });
-		if (!project) {
-			throw new NotFoundException();
-		}
-
-		const membership = await this.prisma.workspaceMember.findUnique({
-			where: { userId_workspaceId: { userId, workspaceId: project.workspaceId } },
-		});
-		if (!membership) {
-			throw new NotFoundException();
-		}
-
-		return project;
-	}
+	constructor(
+		private readonly prisma: PrismaService,
+		private readonly access: ProjectAccessService,
+	) {}
 
 	async list(userId: string) {
 		return this.prisma.project.findMany({
@@ -35,7 +23,7 @@ export class ProjectsService {
 	}
 
 	async get(id: string, userId: string) {
-		const project = await this.ensureProjectAccess(id, userId);
+		const project = await this.access.ensureProjectAccess(id, userId);
 		return this.prisma.project.findUnique({
 			where: { id: project.id },
 			include: {
@@ -48,12 +36,7 @@ export class ProjectsService {
 	}
 
 	async create(userId: string, workspaceId: string, dto: CreateProjectDto) {
-		const membership = await this.prisma.workspaceMember.findUnique({
-			where: { userId_workspaceId: { userId, workspaceId } },
-		});
-		if (!membership) {
-			throw new NotFoundException();
-		}
+		await this.access.ensureWorkspaceAccess(workspaceId, userId);
 
 		return this.prisma.project.create({
 			data: {
@@ -69,7 +52,7 @@ export class ProjectsService {
 		if (dto.name === undefined && dto.description === undefined) {
 			throw new BadRequestException('At least one field is required');
 		}
-		await this.ensureProjectAccess(id, userId);
+		await this.access.ensureProjectAccess(id, userId);
 
 		return this.prisma.project.update({
 			where: { id },
@@ -78,7 +61,7 @@ export class ProjectsService {
 	}
 
 	async remove(id: string, userId: string) {
-		await this.ensureProjectAccess(id, userId);
+		await this.access.ensureProjectAccess(id, userId);
 		return this.prisma.project.delete({ where: { id } });
 	}
 }

@@ -1,43 +1,15 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { ProjectsService } from '../projects/projects.service';
+import { ProjectAccessService } from '../projects/project-access.service';
+import { DocumentAccessService } from './document-access.service';
 
 @Injectable()
 export class DocumentsService {
 	constructor(
 		private prisma: PrismaService,
-		private projectsService: ProjectsService,
+		private projectAccess: ProjectAccessService,
+		private documentAccess: DocumentAccessService,
 	) {}
-
-	private async ensureDocumentAccess(id: string, userId: string) {
-		const document = await this.prisma.document.findUnique({
-			where: {
-				id,
-			},
-			include: {
-				project: true,
-			},
-		});
-
-		if (!document) {
-			throw new NotFoundException();
-		}
-
-		const membership = await this.prisma.workspaceMember.findUnique({
-			where: {
-				userId_workspaceId: {
-					userId,
-					workspaceId: document.project.workspaceId,
-				},
-			},
-		});
-
-		if (!membership) {
-			throw new NotFoundException();
-		}
-
-		return document;
-	}
 
 	async list(projectId: string, userId: string) {
 		const project = await this.prisma.project.findUnique({
@@ -50,7 +22,7 @@ export class DocumentsService {
 			throw new NotFoundException();
 		}
 
-		await this.projectsService.ensureProjectAccess(projectId, userId);
+		await this.projectAccess.ensureProjectAccess(projectId, userId);
 
 		return this.prisma.document.findMany({
 			where: {
@@ -70,7 +42,7 @@ export class DocumentsService {
 	}
 
 	async get(id: string, userId: string) {
-		await this.ensureDocumentAccess(id, userId);
+		await this.documentAccess.ensureDocumentAccess(id, userId);
 
 		return this.prisma.document.findUnique({
 			where: {
@@ -88,7 +60,7 @@ export class DocumentsService {
 	}
 
 	async create(projectId: string, userId: string, data: any) {
-		await this.projectsService.ensureProjectAccess(projectId, userId);
+		await this.projectAccess.ensureProjectAccess(projectId, userId);
 
 		return this.prisma.document.create({
 			data: {
@@ -100,7 +72,7 @@ export class DocumentsService {
 	}
 
 	async update(id: string, userId: string, data: any) {
-		await this.ensureDocumentAccess(id, userId);
+		await this.documentAccess.ensureDocumentAccess(id, userId);
 
 		return this.prisma.document.update({
 			where: {
@@ -111,7 +83,7 @@ export class DocumentsService {
 	}
 
 	async remove(id: string, userId: string) {
-		await this.ensureDocumentAccess(id, userId);
+		await this.documentAccess.ensureDocumentAccess(id, userId);
 
 		return this.prisma.document.delete({
 			where: {
