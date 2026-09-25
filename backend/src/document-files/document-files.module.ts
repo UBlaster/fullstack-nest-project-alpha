@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AccessModule } from '../access/access.module';
 import { StorageModule } from '../storage/storage.module';
-import { DocumentFilesController } from './document-files.controller';
+import { DocumentFilesController } from './controllers/document-files.controller';
 import { DocumentFilesService } from './document-files.service';
 
 @Module({

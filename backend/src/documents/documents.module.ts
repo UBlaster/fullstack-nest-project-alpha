@@ -1,13 +1,15 @@
 import { Module } from '@nestjs/common';
 import { AccessModule } from '../access/access.module';
 import { CacheModule } from '../cache/cache.module';
-import { DocumentsController } from './documents.controller';
+import { DocumentsController } from './controllers/documents.controller';
+import { ProjectDocumentsController } from './controllers/project-documents.controller';
+import { WorkspaceDocumentsController } from './controllers/workspace-documents.controller';
 import { DocumentsExportService } from './documents-export.service';
 import { DocumentsService } from './documents.service';
 
 @Module({
 	imports: [AccessModule, CacheModule],
-	controllers: [DocumentsController],
+	controllers: [DocumentsController, ProjectDocumentsController, WorkspaceDocumentsController],
 	providers: [DocumentsService, DocumentsExportService],
 	exports: [DocumentsExportService],
 })

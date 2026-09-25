@@ -1,20 +1,10 @@
-import {
-	Body,
-	Controller,
-	Delete,
-	Get,
-	HttpCode,
-	Param,
-	Post,
-	Req,
-	UseGuards,
-} from '@nestjs/common';
-import { AuthGuard } from '@nestjs/passport';
-import { AuthenticatedRequest } from '../auth/authenticated-request';
-import { DocumentFilesService } from './document-files.service';
-import { CreateUploadUrlDto } from './dto/create-upload-url.dto';
+import { Body, Controller, Delete, Get, HttpCode, Param, Post, Req } from '@nestjs/common';
+import { AuthenticatedRequest } from '../../auth/authenticated-request';
+import { JwtAuth } from '../../auth/decorators/jwt-auth.decorator';
+import { DocumentFilesService } from '../document-files.service';
+import { CreateUploadUrlDto } from '../dto/create-upload-url.dto';
 
-@UseGuards(AuthGuard('jwt'))
+@JwtAuth()
 @Controller('documents/:documentId/files')
 export class DocumentFilesController {
 	constructor(private readonly documentFiles: DocumentFilesService) {}

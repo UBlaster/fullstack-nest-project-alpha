@@ -4,14 +4,14 @@ export class CreateUploadUrlDto {
 	@IsString()
 	@MinLength(1)
 	@MaxLength(200)
-	fileName!: string;
+	declare fileName: string;
 
 	@IsString()
 	@MinLength(1)
 	@MaxLength(100)
-	mimeType!: string;
+	declare mimeType: string;
 
 	@IsInt()
 	@Min(1)
-	size!: number;
+	declare size: number;
 }
