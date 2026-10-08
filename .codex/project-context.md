@@ -1,69 +1,52 @@
-# Контекст проекта nest-fullstack-project
+# Контекст Task 5
 
-Актуализирован 9 сентября 2026 года по правилам `.codex/work-rules.md` и фактам проверки Task 1.
-Это ориентир для работы, не утверждение, что все ветки имеют одинаковую реализацию.
-Текущий checkout: `master`, база `d69ce21`. Файл — локальная память, не добавляется в commits.
+Ветка: `feature/task-5-start`. Проверенная исходная база кода: `045983b`.
 
-## Назначение и стек
+## Уже реализовано
 
-Учебный production-like modular monolith: User → Workspace → Project → Document.
-Подтверждённые версии исходной базы: Node.js 20, npm, React 18.3, TypeScript, Vite,
-React Router, NestJS 10.4, Prisma 6.19, PostgreSQL 16. Не обновляй стек автоматически.
+Workspace → Project → Document: NestJS/Prisma/PostgreSQL backend с feature modules,
+DI и Controller → Service → PrismaService; React/Vite frontend.
+Есть CRUD, JWT, RBAC, workspace search и Redis cache-aside.
 
-## Ветки и учебные материалы
+- `backend/prisma/schema.prisma`: Project.workspaceId, Document.projectId/authorId,
+  title/content/status/timestamps и relation author→User уже существуют.
+  DocumentFile и relation файлов ещё нет.
+- `backend/src/access/access-policy.service.ts`: `requireDocument(userId, documentId, action)`
+  возвращает document с project.workspaceId; есть `requireWorkspace(userId, workspaceId, action, resource)`.
+  Нет membership — скрытый `404`, запрещённое действие — `403`;
+  `permissions.ts`: document/view — все три роли, update — OWNER/MEMBER, delete — OWNER.
+  JWT identity — `request.user.sub`.
+- `backend/src/documents/controllers/workspace-documents.controller.ts` обслуживает workspace search.
+  DocumentsService.search включает tenant predicate в SQL; ответ —
+  id/projectId/title/status/updatedAt/author.name/score без content.
+  Существующие DTO, ranking и shape сохраняются.
+- `backend/src/cache/cache.service.ts` кеширует workspace project list/document search.
+  Policy выполняется до Redis; ключи включают workspace version,
+  успешные project/document mutations повышают version; при отказе Redis остаётся PostgreSQL fallback.
+  Files/export не входят в эти read-контракты.
+- `frontend/src/shared/api/client.ts` добавляет bearer token и разбирает JSON (204 → null).
+  `frontend/src/pages/document/ui/DocumentPage.tsx` содержит document CRUD;
+  `frontend/src/pages/project/ui/ProjectPage.tsx` знает project.workspaceId и workspace search.
+  File UI и CSV download пока отсутствуют.
 
-- STAGE ученика всегда начинается от актуального master.
-- `0_TARUSOV_STAGE` — накопительная реализация Tarusov с последующими задачами,
-  не исходный шаблон STAGE нового ученика.
-- На проверенном master (`d69ce21`) auth/projects ещё в `backend/src/auth.ts` и
-  `backend/src/resources.ts`; это исходное приложение, не завершённая Task 1.
-- Историческая TT1 — `feature/TT-1-refacor-hash` (`1d3a385`): feature-модули,
-  bcrypt, регистрация/удаление, DTO, создание проекта через workspace в URL.
-- Task 1 и Guide 1 находятся в `docs/tasks/01-auth-projects-refactoring-and-password-hashing.md`
-  и `docs/guides/01-password-hashing-dto-and-module-boundaries-primer.md`.
-  Документы могут быть на диске, хотя `docs` игнорируется Git. Не меняй ignore-правила ради их поиска.
-- Код и тесты соответствующей ветки определяют реализованное поведение. Документация отдельно
-  фиксирует требования, ещё не выполненные исторической реализацией. Не смешивай эти категории.
+## Текущая задача и ориентиры
 
-## Устройство приложения
+Task 5 — private-вложения через Yandex Object Storage/presigned URLs
+и потоковый CSV workspace с ограниченной памятью и остановкой после disconnect.
+Материалы выдаются отдельно: Task `05-object-storage-presigned-urls-and-streaming-export.md`,
+Guide `05-object-storage-presigned-urls-and-streams-primer.md`.
 
-- Backend: Controller → Service → PrismaService, feature modules и Nest DI.
-- WorkspaceMember связывает User с Workspace; уникальный ключ — `userId_workspaceId`.
-  На исходном master create ещё выбирает первый membership; Task 1 требует URL workspace и lookup
-  по обоим ID. JWT подтверждает identity, не membership.
-- Project имеет workspace и создателя; Document — проект и автора. При удалении User связи
-  авторства ограничены `Restrict`; memberships можно удалить. Общие данные не каскадируют от User.
-- На исходном master projects принимает `any`, а login/seed используют plaintext. Runtime DTO,
-  явный allowlist Prisma data и bcrypt — результат Task 1; hash не входит в public response.
-- Полный RBAC и остальные подсистемы зависят от выполненной задачи/ветки. Не вводи их заранее.
-- Repository/CQRS/DDD не нужны как механическая обёртка над Prisma.
+Точки расширения: Prisma schema/new migration, `backend/src/storage/`,
+`backend/src/document-files/`, documents-export service, DocumentsModule/workspace controller и указанный UI.
+AWS SDK v3 и storage scripts уже есть в `backend/package.json`,
+но модули storage/document-files/export и файлы этих scripts ещё отсутствуют.
 
-## Локальное окружение
+## Проверки
 
-- Docker Compose: backend/frontend и workspace для IDE. Dev-образы — `node:20-bookworm`,
-  PostgreSQL — `postgres:16`.
-- Проект в workspace-контейнере — `/workspace`; backend/frontend работают в `/app` своих образов.
-  Зависимости находятся в образах приложений; наличие node_modules volumes не предполагается.
-- Команды приложения: `docker compose exec -T backend npm run <script>` и аналогично frontend.
-- Адреса с хоста: frontend `http://localhost:5173`, backend `http://localhost:3000`,
-  Swagger `http://localhost:3000/api/docs`, health `http://localhost:3000/health`.
-- Корневой `.env` создаётся по `.env.example`; Compose передаёт env сервисам.
-- `db-init` применяет migrations и seed. Запуск окружения может менять БД, поэтому он не нужен
-  для обычной редактуры документации.
-- Demo credentials — только локальные fixtures; в БД должны быть hashes. Повторный seed
-  не сбрасывает пользовательские пароли. JWT в frontend localStorage — учебное упрощение.
-
-## Подготовлено к разрешённому commit в master
-
-- Task 1 и Guide 1 переработаны; код приложения не менялся. Документы остаются локально в `docs`.
-- Подготовлен только корневой AGENTS.md: bootstrap локальной памяти для Cursor (`.cursor`),
-  Claude Code (`.claude`) и Codex (`.codex`); контекст обновляется перед commit, work-rules создаётся
-  один раз по `.cursor` и lint/format настройкам. Claude Code требует первого чтения AGENTS.md
-  по запросу ученика и локального `.claude/CLAUDE.md` с imports; адаптер в master не включается.
-- Прежние редакторские изменения `.cursor` возвращены к master; исходные правила не изменены.
-- Проверки документации уже выполнены: 10 Mermaid-схем, strict-компиляция 19 учебных TS-файлов,
-  три теста примеров, локальные ссылки и secret scan только Task 1/Guide 1. Секреты не найдены.
-- Пользователь разрешил commit AGENTS.md в master. В staging должен быть только AGENTS.md;
-  `.codex/`, Task/Guide и исходные `.cursor/rules/` в этот commit не входят. Push не разрешён.
-- Источники поведения агентов: официальные Cursor Rules, Claude Code Memory и Codex AGENTS.md.
-  Новый hash до создания commit не указан. Код приложения и БД не менялись.
+`backend/test/object-storage.e2e-spec.ts` уже импортирует отсутствующие модули текущей задачи:
+это acceptance-заготовка, общий test:e2e пока не обещает зелёный результат.
+В настроенном окружении: `docker compose config --quiet`;
+`docker compose exec -T <backend|frontend> npm run <script>`, scripts format:check/lint/build.
+Backend E2E: `test:e2e -- --runInBand object-storage.e2e-spec.ts` после реализации;
+сохранить auth/rbac/search/cache проверки. Использовать выделенную тестовую БД
+и только собственные fixtures/objects.
