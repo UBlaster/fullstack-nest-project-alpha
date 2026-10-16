@@ -310,6 +310,7 @@ export class DocumentFilesService {
 		};
 		for await (const key of this.storage.list(prefix)) {
 			scanned += 1;
+			if (!/^workspaces\/[^/]+\/documents\//.test(key)) continue;
 			keys.push(key);
 			if (keys.length === 500) await inspectBatch();
 		}

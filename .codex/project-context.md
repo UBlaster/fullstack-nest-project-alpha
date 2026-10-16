@@ -1,3 +1,46 @@
+# Актуальный контекст Task 6 — 15 октября 2026
+
+- Checkout: TT6-background-export-jobs-and-worker; проверенная исходная вершина 12fa111.
+- Текущая работа: сверка реализации с Task 6 и переработка Guide 6 по формату Guide 5.
+- Merge feature/task-5-start (9585fc9) подготовлен с --no-commit; все конфликты разрешены.
+  AGENTS.md совпадает с master; собственный контекст TT6 сохранён. Commit/push не выполнялись.
+- По согласованию пользователя каждая попытка export сохраняет отдельный key
+  workspaces/{workspaceId}/exports/{exportJobId}/{processingToken}.csv.
+  Stable queueJobId остаётся export-{id}. Это защищает файл победителя после recovery.
+- Исправлено взаимодействие Task 5/6: DocumentFilesService.checkOrphans учитывает
+  как кандидатов только namespace documents; export keys не удаляются как file orphans.
+  Добавлены два отдельных regression-сценария dry-run/apply. Существующие тесты не менялись.
+- Task 6 и Guide 6 актуализированы во внешней папке учебных материалов
+  C:/fontend/mentoring/folders/NotPublish/nest-fullstack-project-docs-20260903-121556.
+  Guide 5 не менялся. В Guide 6 реальные модели, routes, методы, lifecycle и ограничения.
+- Проверки: 136 E2E/regression passed, 1 штатный Redis-degradation scenario skipped;
+  отдельные PostgreSQL 16, Redis 7 и virtual-hosted MinIO. Worker restart → completed
+  CSV с реальным S3 download; idle SIGTERM 0,27 с, exit 0. Backend/frontend lint,
+  format и build прошли; Windows build требовал разрешения записи существующих artifacts.
+  Документы: 4 Mermaid-схемы, ссылки, fences и 27 фрагментов исходников проверены.
+- Дополнительно выполнена проверка реального Yandex Object Storage на отдельной
+  PostgreSQL 16/Redis 7 и отдельных API/worker: повторная regression 136 passed,
+  1 штатный skipped. Task 5 использует настоящий S3; fake suites Task 6 дополнены
+  отдельными реальными cloud/browser сценариями, не выдаются за S3 integration.
+- Browser на localhost:5173: upload → READY → download с совпавшим SHA-256 → delete;
+  фоновый CSV COMPLETED/100% скачан браузером и совпал с Yandex GetObject.
+  QUEUED cancel проверен через UI; export пережил остановку worker до обработки.
+- Реальный multipart: 12 000 документов, 6 336 051 байт, две части; CSV escaping,
+  отсутствие private content и совпадение presigned download/GetObject подтверждены.
+  Anonymous read denied; retention удалил точный объект после тестового истечения
+  expiresAt, API/UI показали истечение срока хранения.
+- Настроенный Yandex access key действителен; CORS PUT/GET проверен браузером.
+  Credentials, bucket policy и .env не менялись. В рабочем bucket использовались
+  только уникальные fixture keys; после cleanup объекты и multipart uploads = 0.
+  Рабочая БД не использовалась. Исходный backend временно останавливался для порта
+  3000; восстановлен, health HTTP 200. Отдельные тестовые сервисы удалены.
+- Guide 6 дополнен фактическими Yandex/browser результатами; Guide 5 не менялся.
+- Этот контекст остаётся вне staging. Постоянные work-rules не менялись.
+
+---
+
+## Сохранённые исторические записи до текущей сверки
+
 # Контекст проекта nest-fullstack-project
 
 Актуализирован 25 сентября 2026 года после возврата в TT6-background-export-jobs-and-worker.
