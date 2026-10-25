@@ -1,9 +1,14 @@
-# Актуальный контекст Task 6 — 15 октября 2026
+# Актуальный контекст Task 6
 
-- Checkout: TT6-background-export-jobs-and-worker; проверенная исходная вершина 12fa111.
-- Текущая работа: сверка реализации с Task 6 и переработка Guide 6 по формату Guide 5.
-- Merge feature/task-5-start (9585fc9) подготовлен с --no-commit; все конфликты разрешены.
-  AGENTS.md совпадает с master; собственный контекст TT6 сохранён. Commit/push не выполнялись.
+- Checkout: TT6-background-export-jobs-and-worker; проверенная исходная вершина 995599b.
+- Реализация Task 6 сохранена. Добавлена локальная отладка: `start:debug`,
+  `.vscode/launch.json`, opt-in `docker-compose.debug.yml` и `DEBUG.md`.
+  API — 3000, frontend — 5173, Inspector — 9229; source maps уже включены.
+- UUID `X-Request-ID` сохраняется в асинхронном контексте. S3-адаптер использует
+  `observeS3`: operation/duration/status/error code/AWS request ID/attempts;
+  исходная ошибка сохраняется, secrets/bytes/presigned URL не логируются.
+  Postman-сценарий проходит reserve → binary PUT → complete → download → cleanup.
+  Диагностические tests и storage regression работают без БД/реального S3.
 - По согласованию пользователя каждая попытка export сохраняет отдельный key
   workspaces/{workspaceId}/exports/{exportJobId}/{processingToken}.csv.
   Stable queueJobId остаётся export-{id}. Это защищает файл победителя после recovery.
@@ -13,7 +18,7 @@
 - Task 6 и Guide 6 актуализированы во внешней папке учебных материалов
   C:/fontend/mentoring/folders/NotPublish/nest-fullstack-project-docs-20260903-121556.
   Guide 5 не менялся. В Guide 6 реальные модели, routes, методы, lifecycle и ограничения.
-- Проверки: 136 E2E/regression passed, 1 штатный Redis-degradation scenario skipped;
+- Проверки предыдущей сверки: 136 E2E/regression passed, 1 штатный Redis-degradation scenario skipped;
   отдельные PostgreSQL 16, Redis 7 и virtual-hosted MinIO. Worker restart → completed
   CSV с реальным S3 download; idle SIGTERM 0,27 с, exit 0. Backend/frontend lint,
   format и build прошли; Windows build требовал разрешения записи существующих artifacts.
@@ -35,7 +40,7 @@
   Рабочая БД не использовалась. Исходный backend временно останавливался для порта
   3000; восстановлен, health HTTP 200. Отдельные тестовые сервисы удалены.
 - Guide 6 дополнен фактическими Yandex/browser результатами; Guide 5 не менялся.
-- Этот контекст остаётся вне staging. Постоянные work-rules не менялись.
+- Постоянные work-rules не менялись.
 
 ---
 
@@ -132,6 +137,7 @@ React Router, NestJS 10.4, Prisma 6.19, PostgreSQL 16. Не обновляй с�
   `.codex/`, Task/Guide и исходные `.cursor/rules/` в этот commit не входят. Push не разрешён.
 - Источники поведения агентов: официальные Cursor Rules, Claude Code Memory и Codex AGENTS.md.
   Новый hash до создания commit не указан. Код приложения и БД не менялись.
+
 ## Актуальное состояние документов, 12 сентября
 
 - Полная локальная копия 20 документов находится вне checkout:
@@ -158,6 +164,7 @@ React Router, NestJS 10.4, Prisma 6.19, PostgreSQL 16. Не обновляй с�
   Создаётся новый дочерний commit без переписывания истории и без переключения checkout.
 - `0_TARUSOV_STAGE` остаётся на `8176319`; текущий индекс, локальные docs и внешняя копия
   сохраняются. Fetch/pull/push не выполняются. Новый commit hash до создания не указан.
+
 ## Подготовлено к commit: требования локального запуска в README, 20 сентября
 
 - В `README.md` добавлен раздел предварительной установки с официальными ссылками Docker Desktop
@@ -171,6 +178,7 @@ React Router, NestJS 10.4, Prisma 6.19, PostgreSQL 16. Не обновляй с�
   и проверка LF прошли. Приложение, migrations, seed и E2E не запускались.
 - В `master` создан commit `5097c73` только с `README.md`; `.codex/project-context.md`
   остаётся локальным unstaged-изменением.
+
 ## Подготовлено к commit: GUI-инструменты в README, 20 сентября
 
 - В `README.md` явно указано требование использовать Docker Desktop с графическим интерфейсом;
@@ -197,6 +205,7 @@ React Router, NestJS 10.4, Prisma 6.19, PostgreSQL 16. Не обновляй с�
 - Docker Engine недоступен по named pipe; запуск, hot reload и macOS не проверялись на практике.
   Установка зависимостей, migrations, seed, E2E и полный аудит не выполнялись.
 - В commit входит только README.md; локальная память остаётся unstaged. Hash ещё не создан.
+
 ## Согласованный план рефакторинга для следующего чата, 25 сентября 2026
 
 Пользователь поручил создать новый чат в этом же проекте и сохранённом checkout и начать

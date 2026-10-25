@@ -5,6 +5,7 @@
 		"build": "nest build",
 		"start": "node dist/main",
 		"start:dev": "nest start --watch",
+		"start:debug": "nest start --debug 127.0.0.1:9229 --watch",
 		"start:worker": "node dist/src/worker/worker",
 		"start:worker:dev": "ts-node src/worker/worker.ts",
 		"prisma:generate": "prisma generate",

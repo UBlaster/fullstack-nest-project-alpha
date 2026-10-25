@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
 	AbortMultipartUploadCommand,
 	CompleteMultipartUploadCommand,
@@ -13,6 +14,8 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Upload } from '@aws-sdk/lib-storage';
 import { Inject, Injectable, OnModuleDestroy } from '@nestjs/common';
+import { getRequestId } from '../diagnostics/request-context';
+import { observeS3 } from '../diagnostics/s3-operation';
 import {
 	ObjectHead,
 	ObjectStorageService,
@@ -51,14 +54,19 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 		mimeType: string;
 		expiresInSeconds: number;
 	}): Promise<string> {
-		return getSignedUrl(
-			this.s3,
-			new PutObjectCommand({
-				Bucket: this.config.bucket,
-				Key: input.objectKey,
-				ContentType: input.mimeType,
-			}),
-			{ expiresIn: input.expiresInSeconds },
+		return observeS3(
+			'PresignPutObject',
+			() =>
+				getSignedUrl(
+					this.s3,
+					new PutObjectCommand({
+						Bucket: this.config.bucket,
+						Key: input.objectKey,
+						ContentType: input.mimeType,
+					}),
+					{ expiresIn: input.expiresInSeconds },
+				),
+			{ presign: true },
 		);
 	}
 
@@ -68,14 +76,19 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 		expiresInSeconds: number;
 	}): Promise<string> {
 		const disposition = contentDisposition(input.downloadName);
-		return getSignedUrl(
-			this.s3,
-			new GetObjectCommand({
-				Bucket: this.config.bucket,
-				Key: input.objectKey,
-				ResponseContentDisposition: disposition,
-			}),
-			{ expiresIn: input.expiresInSeconds },
+		return observeS3(
+			'PresignGetObject',
+			() =>
+				getSignedUrl(
+					this.s3,
+					new GetObjectCommand({
+						Bucket: this.config.bucket,
+						Key: input.objectKey,
+						ResponseContentDisposition: disposition,
+					}),
+					{ expiresIn: input.expiresInSeconds },
+				),
+			{ presign: true },
 		);
 	}
 
@@ -85,6 +98,7 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 		contentType: string;
 		signal: AbortSignal;
 	}): Promise<void> {
+		const requestId = getRequestId() ?? randomUUID();
 		const abortError = () =>
 			Object.assign(new Error('Export upload aborted'), { name: 'AbortError' });
 		if (input.signal.aborted) throw abortError();
@@ -105,20 +119,30 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 						| AbortMultipartUploadCommand,
 				) => {
 					if (command instanceof AbortMultipartUploadCommand) {
-						const result = await target.send(command);
+						const result = await observeS3('AbortMultipartUpload', () => target.send(command), {
+							requestId,
+						});
 						multipartAborted = true;
 						return result;
 					}
 					if (input.signal.aborted) throw abortError();
 					const options = { abortSignal: input.signal };
 					if (command instanceof CreateMultipartUploadCommand) {
-						const result = await target.send(command, options);
+						const result = await observeS3(
+							'CreateMultipartUpload',
+							() => target.send(command, options),
+							{ requestId },
+						);
 						uploadId = result.UploadId;
 						return result;
 					}
-					if (command instanceof UploadPartCommand) return target.send(command, options);
-					if (command instanceof PutObjectCommand) return target.send(command, options);
-					return target.send(command, options);
+					if (command instanceof UploadPartCommand)
+						return observeS3('UploadPart', () => target.send(command, options), { requestId });
+					if (command instanceof PutObjectCommand)
+						return observeS3('PutObject', () => target.send(command, options), { requestId });
+					return observeS3('CompleteMultipartUpload', () => target.send(command, options), {
+						requestId,
+					});
 				};
 			},
 		});
@@ -145,12 +169,17 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 			// Upload does not abort the multipart session if its final Complete fails.
 			if (uploadId && !multipartAborted) {
 				try {
-					await this.s3.send(
-						new AbortMultipartUploadCommand({
-							Bucket: this.config.bucket,
-							Key: input.objectKey,
-							UploadId: uploadId,
-						}),
+					await observeS3(
+						'AbortMultipartUpload',
+						() =>
+							this.s3.send(
+								new AbortMultipartUploadCommand({
+									Bucket: this.config.bucket,
+									Key: input.objectKey,
+									UploadId: uploadId,
+								}),
+							),
+						{ requestId },
 					);
 				} catch (cleanupError) {
 					if (
@@ -167,11 +196,13 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 	}
 
 	async head(objectKey: string): Promise<ObjectHead> {
-		const result = await this.s3.send(
-			new HeadObjectCommand({
-				Bucket: this.config.bucket,
-				Key: objectKey,
-			}),
+		const result = await observeS3('HeadObject', () =>
+			this.s3.send(
+				new HeadObjectCommand({
+					Bucket: this.config.bucket,
+					Key: objectKey,
+				}),
+			),
 		);
 		return {
 			size: result.ContentLength ?? -1,
@@ -182,11 +213,13 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 
 	async remove(objectKey: string): Promise<void> {
 		try {
-			await this.s3.send(
-				new DeleteObjectCommand({
-					Bucket: this.config.bucket,
-					Key: objectKey,
-				}),
+			await observeS3('DeleteObject', () =>
+				this.s3.send(
+					new DeleteObjectCommand({
+						Bucket: this.config.bucket,
+						Key: objectKey,
+					}),
+				),
 			);
 		} catch (error) {
 			if (!isNotFound(error)) throw error;
@@ -194,14 +227,20 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 	}
 
 	async *list(prefix?: string): AsyncIterable<string> {
+		const requestId = getRequestId() ?? randomUUID();
 		let continuationToken: string | undefined;
 		do {
-			const result = await this.s3.send(
-				new ListObjectsV2Command({
-					Bucket: this.config.bucket,
-					Prefix: prefix,
-					ContinuationToken: continuationToken,
-				}),
+			const result = await observeS3(
+				'ListObjectsV2',
+				() =>
+					this.s3.send(
+						new ListObjectsV2Command({
+							Bucket: this.config.bucket,
+							Prefix: prefix,
+							ContinuationToken: continuationToken,
+						}),
+					),
+				{ requestId },
 			);
 			for (const object of result.Contents ?? []) {
 				if (object.Key) yield object.Key;
