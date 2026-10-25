@@ -1,6 +1,6 @@
 # Контекст Task 4
 
-Ветка: `feature/task-4-start`. Проверенная исходная база кода: `dd1498c`.
+Ветка: `feature/task-4-start`. Проверенная исходная база кода: `6cb1310`.
 
 ## Уже реализовано
 
@@ -32,6 +32,13 @@ CacheModule/CacheService отсутствуют: feature reads обращают�
   из requireDocument; create берёт workspace/project из URL.
   Это источники tenant для интеграции инвалидации.
 
+- Локальная отладка: `start:debug`, профили `.vscode/launch.json` и opt-in
+  `docker-compose.debug.yml`; API — 3000, frontend — 5173, Inspector — 9229.
+  Source maps включены; Docker mapping — `backend` → `/app`. Инструкция — `DEBUG.md`.
+- UUID `X-Request-ID` сохраняется в асинхронном контексте; `observeS3` логирует
+  только безопасные metadata и сохраняет исходную ошибку. S3-адаптера в этой базе нет;
+  Postman-сценарий рассчитан на завершённую Task 5.
+
 ## Текущая задача и проверки
 
 Task 4 — cache-aside для двух указанных workspace reads с сохранением HTTP, доступа и SQL-контрактов.
@@ -44,5 +51,8 @@ Guide `04-redis-cache-aside-primer.md`.
 это acceptance будущей реализации текущей задачи. Регрессии поиска — `search.e2e-spec.ts`.
 В настроенном окружении: `docker compose config --quiet`;
 `docker compose exec -T backend npm run <script>`, scripts format:check/lint/build/test:e2e.
+`diagnostics.e2e-spec.ts` проверяет request context и безопасное логирование без БД/S3.
+Полная сборка включает acceptance-тесты и пока блокируется тремя импортами
+отсутствующего `src/cache` в неизменённом `cache.e2e-spec.ts`.
 Целевой E2E: `test:e2e -- --runInBand cache.e2e-spec.ts`;
 проверить также недоступный Redis по Task. E2E — выделенные PostgreSQL/Redis и собственные fixtures.

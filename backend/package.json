@@ -5,6 +5,7 @@
 		"build": "nest build",
 		"start": "node dist/main",
 		"start:dev": "nest start --watch",
+		"start:debug": "nest start --debug 127.0.0.1:9229 --watch",
 		"prisma:generate": "prisma generate",
 		"prisma:migrate": "prisma migrate dev",
 		"prisma:seed": "prisma db seed",

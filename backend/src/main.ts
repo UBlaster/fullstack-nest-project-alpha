@@ -3,9 +3,11 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { createAppValidationPipe } from './validation.pipe';
+import { requestContextMiddleware } from './diagnostics/request-context';
 
 async function bootstrap() {
 	const app = await NestFactory.create(AppModule);
+	app.use(requestContextMiddleware);
 
 	app.enableCors({
 		origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
