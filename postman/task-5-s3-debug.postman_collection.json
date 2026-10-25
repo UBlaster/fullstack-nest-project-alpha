@@ -1,0 +1,418 @@
+{
+	"info": {
+		"name": "Workspace Docs — Task 5 S3 debug",
+		"description": "Requires completed Task 5 (or TT6), an existing permitted document and an isolated test environment. Start branches do not implement these routes yet. No AWS credentials are required. Set accessToken locally. Requests 02 and 06 explicitly use No Auth and disable cookies/redirects. Select fixtures/debug-upload.txt as binary body (3 bytes: abc). One run reserves, PUTs, completes, downloads and deletes only its own attachment. Signed URLs are temporary local collection variables; clear them and accessToken before exporting. Postman Desktop does not validate browser CORS.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{accessToken}}",
+				"type": "string"
+			}
+		]
+	},
+	"variable": [
+		{
+			"key": "requestId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "fileId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "uploadUrl",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "downloadUrl",
+			"value": "",
+			"type": "string"
+		}
+	],
+	"item": [
+		{
+			"name": "00 Health",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+							"if (pm.response.code !== 200) {",
+							"  pm.execution.setNextRequest(null);",
+							"  throw new Error(\"Unexpected HTTP status; stop and inspect this response before continuing.\");",
+							"}"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": "{{apiBaseUrl}}/health",
+				"auth": {
+					"type": "noauth"
+				}
+			}
+		},
+		{
+			"name": "01 Reserve upload URL",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"if (!pm.environment.get(\"accessToken\")) throw new Error(\"Set accessToken locally; do not export it.\");",
+							"if (!pm.environment.get(\"documentId\")) throw new Error(\"Set documentId to your own test document.\");",
+							"[\"fileId\", \"uploadUrl\", \"downloadUrl\"].forEach(key => pm.collectionVariables.unset(key));",
+							"pm.collectionVariables.set(\"requestId\", pm.variables.replaceIn(\"{{$guid}}\"));"
+						]
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+							"if (pm.response.code !== 201) {",
+							"  pm.execution.setNextRequest(null);",
+							"  throw new Error(\"Unexpected HTTP status; stop and inspect this response before continuing.\");",
+							"}",
+							"const body = pm.response.json();",
+							"pm.test(\"Reserved metadata belongs to the requested document\", () => {",
+							"  pm.expect(body.file.documentId).to.equal(pm.environment.get(\"documentId\"));",
+							"  pm.expect(body.file.status).to.equal(\"PENDING\");",
+							"  pm.expect(body.file.size).to.equal(Number(pm.environment.get(\"fileSize\")));",
+							"  pm.expect(Object.hasOwn(body.file, \"objectKey\")).to.equal(false);",
+							"  pm.expect(Object.hasOwn(body.file, \"bucket\")).to.equal(false);",
+							"});",
+							"pm.test(\"Temporary URL and correlation id are returned\", () => {",
+							"  pm.expect(typeof body.uploadUrl === \"string\" && /^https?:\\/\\//.test(body.uploadUrl)).to.equal(true);",
+							"  pm.expect(body.expiresInSeconds > 0).to.equal(true);",
+							"  pm.expect(pm.response.headers.get(\"X-Request-ID\")).to.equal(pm.collectionVariables.get(\"requestId\"));",
+							"});",
+							"if (!body.file?.id || !body.uploadUrl) {",
+							"  pm.execution.setNextRequest(null);",
+							"  throw new Error(\"Reserve response is incomplete.\");",
+							"}",
+							"pm.collectionVariables.set(\"fileId\", body.file.id);",
+							"pm.collectionVariables.set(\"uploadUrl\", body.uploadUrl);"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "X-Request-ID",
+						"value": "{{requestId}}"
+					},
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"url": "{{apiBaseUrl}}/documents/{{documentId}}/files/upload-url",
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"fileName\": \"{{fileName}}\",\n  \"mimeType\": \"{{mimeType}}\",\n  \"size\": {{fileSize}}\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				}
+			}
+		},
+		{
+			"name": "02 PUT binary to S3 — No Auth",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"if (!pm.collectionVariables.get(\"uploadUrl\")) throw new Error(\"Run the preceding URL request first.\");",
+							"pm.request.headers.remove(\"Authorization\");",
+							"pm.request.headers.remove(\"Cookie\");"
+						]
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+							"if (pm.response.code !== 200) {",
+							"  pm.execution.setNextRequest(null);",
+							"  throw new Error(\"Unexpected HTTP status; stop and inspect this response before continuing.\");",
+							"}",
+							"pm.test(\"S3 PUT carries no API Authorization header\", () => {",
+							"  pm.expect(pm.request.headers.has(\"Authorization\")).to.equal(false);",
+							"});"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "PUT",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "{{mimeType}}"
+					}
+				],
+				"url": "{{uploadUrl}}",
+				"auth": {
+					"type": "noauth"
+				},
+				"body": {
+					"mode": "file",
+					"file": {
+						"src": "fixtures/debug-upload.txt"
+					}
+				},
+				"description": "Choose the supplied 3-byte file as binary body. Do not use form-data, Bearer/AWS auth, or alter the signed URL. Configure the Postman working directory to this repository's postman directory, or choose the file manually."
+			},
+			"protocolProfileBehavior": {
+				"disableCookies": true,
+				"followRedirects": false
+			}
+		},
+		{
+			"name": "03 Complete — API checks S3 HEAD",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"if (!pm.collectionVariables.get(\"fileId\")) throw new Error(\"Run 01 Reserve first.\");",
+							"if (!pm.environment.get(\"accessToken\")) throw new Error(\"Set the local accessToken in the example environment.\");"
+						]
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+							"if (pm.response.code !== 200) {",
+							"  pm.execution.setNextRequest(null);",
+							"  throw new Error(\"Unexpected HTTP status; stop and inspect this response before continuing.\");",
+							"}",
+							"const file = pm.response.json();",
+							"pm.test(\"HEAD verification completed the reserved attachment\", () => {",
+							"  pm.expect(file.id).to.equal(pm.collectionVariables.get(\"fileId\"));",
+							"  pm.expect(file.status).to.equal(\"READY\");",
+							"  pm.expect(file.size).to.equal(Number(pm.environment.get(\"fileSize\")));",
+							"});"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "X-Request-ID",
+						"value": "{{requestId}}"
+					}
+				],
+				"url": "{{apiBaseUrl}}/documents/{{documentId}}/files/{{fileId}}/complete"
+			}
+		},
+		{
+			"name": "04 List attachments",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"if (!pm.collectionVariables.get(\"fileId\")) throw new Error(\"Run 01 Reserve first.\");",
+							"if (!pm.environment.get(\"accessToken\")) throw new Error(\"Set the local accessToken in the example environment.\");"
+						]
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+							"if (pm.response.code !== 200) {",
+							"  pm.execution.setNextRequest(null);",
+							"  throw new Error(\"Unexpected HTTP status; stop and inspect this response before continuing.\");",
+							"}",
+							"pm.test(\"The completed attachment is listed\", () => {",
+							"  const found = pm.response.json().find(file => file.id === pm.collectionVariables.get(\"fileId\"));",
+							"  pm.expect(Boolean(found && found.status === \"READY\")).to.equal(true);",
+							"});"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "X-Request-ID",
+						"value": "{{requestId}}"
+					}
+				],
+				"url": "{{apiBaseUrl}}/documents/{{documentId}}/files"
+			}
+		},
+		{
+			"name": "05 Get download URL",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"if (!pm.collectionVariables.get(\"fileId\")) throw new Error(\"Run 01 Reserve first.\");",
+							"if (!pm.environment.get(\"accessToken\")) throw new Error(\"Set the local accessToken in the example environment.\");"
+						]
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+							"if (pm.response.code !== 200) {",
+							"  pm.execution.setNextRequest(null);",
+							"  throw new Error(\"Unexpected HTTP status; stop and inspect this response before continuing.\");",
+							"}",
+							"const body = pm.response.json();",
+							"pm.test(\"Download capability is temporary\", () => {",
+							"  pm.expect(typeof body.downloadUrl === \"string\" && /^https?:\\/\\//.test(body.downloadUrl)).to.equal(true);",
+							"  pm.expect(body.expiresInSeconds > 0).to.equal(true);",
+							"});",
+							"if (!body.downloadUrl) {",
+							"  pm.execution.setNextRequest(null);",
+							"  throw new Error(\"Download URL is missing.\");",
+							"}",
+							"pm.collectionVariables.set(\"downloadUrl\", body.downloadUrl);"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "X-Request-ID",
+						"value": "{{requestId}}"
+					}
+				],
+				"url": "{{apiBaseUrl}}/documents/{{documentId}}/files/{{fileId}}/download-url"
+			}
+		},
+		{
+			"name": "06 GET bytes from S3 — No Auth",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"if (!pm.collectionVariables.get(\"downloadUrl\")) throw new Error(\"Run the preceding URL request first.\");",
+							"pm.request.headers.remove(\"Authorization\");",
+							"pm.request.headers.remove(\"Cookie\");"
+						]
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+							"if (pm.response.code !== 200) {",
+							"  pm.execution.setNextRequest(null);",
+							"  throw new Error(\"Unexpected HTTP status; stop and inspect this response before continuing.\");",
+							"}",
+							"pm.test(\"Downloaded bytes match the supplied test fixture\", () => {",
+							"  pm.expect(pm.response.text() === pm.environment.get(\"expectedText\")).to.equal(true);",
+							"});",
+							"pm.test(\"S3 GET carries no API Authorization header\", () => {",
+							"  pm.expect(pm.request.headers.has(\"Authorization\")).to.equal(false);",
+							"});",
+							"pm.collectionVariables.unset(\"uploadUrl\");",
+							"pm.collectionVariables.unset(\"downloadUrl\");"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": "{{downloadUrl}}",
+				"auth": {
+					"type": "noauth"
+				}
+			},
+			"protocolProfileBehavior": {
+				"disableCookies": true,
+				"followRedirects": false
+			}
+		},
+		{
+			"name": "07 Cleanup this attachment",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"if (!pm.collectionVariables.get(\"fileId\")) throw new Error(\"Run 01 Reserve first.\");",
+							"if (!pm.environment.get(\"accessToken\")) throw new Error(\"Set the local accessToken in the example environment.\");"
+						]
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test(\"HTTP 204\", () => pm.response.to.have.status(204));",
+							"if (pm.response.code !== 204) {",
+							"  pm.execution.setNextRequest(null);",
+							"  throw new Error(\"Unexpected HTTP status; stop and inspect this response before continuing.\");",
+							"}",
+							"[\"fileId\", \"uploadUrl\", \"downloadUrl\", \"requestId\"].forEach(key => pm.collectionVariables.unset(key));"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "DELETE",
+				"header": [
+					{
+						"key": "X-Request-ID",
+						"value": "{{requestId}}"
+					}
+				],
+				"url": "{{apiBaseUrl}}/documents/{{documentId}}/files/{{fileId}}",
+				"description": "Deletes only the fileId captured by request 01. Also usable manually for cleanup after an interrupted scenario. No bucket-wide or prefix deletion."
+			}
+		}
+	]
+}
