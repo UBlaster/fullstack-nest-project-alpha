@@ -1,6 +1,6 @@
 # Контекст Task 1
 
-Ветка: `feature/task-1-start`. Проверенная исходная база кода: `8ec6b4a`.
+Ветка: `feature/task-1-start`. Проверенная исходная база кода: `8795c42`.
 Начало Task 1; перечисленное ниже — состояние до её реализации.
 
 ## Уже есть в базе
@@ -21,6 +21,13 @@ NestJS backend с Prisma/PostgreSQL. Целевая цепочка — Controlle
   detail — `documents[].author.name`. Порядок — `updatedAt desc`.
   Ответы используются страницами `frontend/src/pages/`.
 - `backend/src/validation.pipe.ts` уже включает `whitelist` и `transform`: лишние поля DTO удаляются.
+- Локальный дебаг: `start:debug`, `.vscode/launch.json` и opt-in
+  `docker-compose.debug.yml`; API — 3000, frontend — 5173, Inspector — 9229.
+  Source maps уже включены; Docker debugger использует mapping `backend` → `/app`.
+- Middleware сохраняет UUID `X-Request-ID` в асинхронном контексте. Общий helper
+  `observeS3` пишет безопасные metadata без изменения результата или исходной ошибки.
+  Самого S3-адаптера и file API в этой базе нет; Postman-сценарий предназначен
+  для завершённой Task 5. Запуск и ограничения описаны в `DEBUG.md`.
 
 ## Текущая задача
 
@@ -38,5 +45,7 @@ Guide `01-password-hashing-dto-and-module-boundaries-primer.md`
 bcrypt и удаление аккаунта; наличие тестов не означает готовую реализацию.
 Используется общий validation pipe.
 Scripts backend: `format:check`, `lint`, `build`, `test:e2e`.
+Отдельный `diagnostics.e2e-spec.ts` проверяет request context и безопасное логирование
+без PostgreSQL/S3; его можно запускать с `--runInBand diagnostics.e2e-spec.ts`.
 Из корня в настроенном окружении: `docker compose exec -T backend npm run <script>`;
 для auth: `test:e2e -- --runInBand auth.e2e-spec.ts`. E2E/seed — на отдельной тестовой БД.
