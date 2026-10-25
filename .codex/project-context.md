@@ -1,6 +1,6 @@
 # Контекст Task 2
 
-Ветка: `feature/task-2-start`. Проверенная исходная база кода: `27efe73`.
+Ветка: `feature/task-2-start`. Проверенная исходная база кода: `53e1c39`.
 
 ## Уже реализовано
 
@@ -28,6 +28,13 @@ NestJS/Prisma/PostgreSQL backend с feature modules, DI и Controller → Servic
   пустой content допустим. Общий `validation.pipe.ts` включает whitelist/transform
   без `forbidNonWhitelisted`.
 
+- Локальная отладка: `start:debug`, профили `.vscode/launch.json` и opt-in
+  `docker-compose.debug.yml`; API — 3000, frontend — 5173, Inspector — 9229.
+  Source maps включены; Docker mapping — `backend` → `/app`. Инструкция — `DEBUG.md`.
+- UUID `X-Request-ID` сохраняется в асинхронном контексте; `observeS3` логирует
+  только безопасные metadata и сохраняет исходную ошибку. S3-адаптера в этой базе нет;
+  Postman-сценарий рассчитан на завершённую Task 5.
+
 ## Текущая задача и ориентиры
 
 Task 2 — единая policy с матрицей `OWNER/MEMBER/VIEWER`, Workspace API,
@@ -43,5 +50,6 @@ Guide `02-rbac-and-data-isolation-primer.md` (в Git этой базы их не
 защиты relation/status полей и archive; это ещё не готовый RBAC.
 Регрессии auth — `auth.e2e-spec.ts`.
 Scripts backend: `format:check`, `lint`, `build`, `test:e2e`.
+`diagnostics.e2e-spec.ts` проверяет request context и безопасное логирование без БД/S3.
 Из корня: `docker compose exec -T backend npm run <script>`;
 E2E: `test:e2e -- --runInBand` на отдельной тестовой БД с применённой схемой.

@@ -1,0 +1,45 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "NestJS: attach local (9229)",
+			"type": "node",
+			"request": "attach",
+			"address": "127.0.0.1",
+			"port": 9229,
+			"restart": true,
+			"timeout": 30000,
+			"sourceMaps": true,
+			"outFiles": ["${workspaceFolder}/backend/dist/**/*.js"],
+			"skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+		},
+		{
+			"name": "NestJS: attach Docker from host (9229)",
+			"type": "node",
+			"request": "attach",
+			"address": "127.0.0.1",
+			"port": 9229,
+			"restart": true,
+			"timeout": 30000,
+			"sourceMaps": true,
+			"localRoot": "${workspaceFolder}/backend",
+			"remoteRoot": "/app",
+			"outFiles": ["${workspaceFolder}/backend/dist/**/*.js"],
+			"skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+		},
+		{
+			"name": "NestJS: attach Docker from Dev Container (9229)",
+			"type": "node",
+			"request": "attach",
+			"address": "backend",
+			"port": 9229,
+			"restart": true,
+			"timeout": 30000,
+			"sourceMaps": true,
+			"localRoot": "${workspaceFolder}/backend",
+			"remoteRoot": "/app",
+			"outFiles": ["${workspaceFolder}/backend/dist/**/*.js"],
+			"skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+		}
+	]
+}
