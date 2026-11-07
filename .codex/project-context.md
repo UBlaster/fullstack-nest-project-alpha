@@ -1,65 +1,49 @@
-# Контекст Task 6: RabbitMQ
+# Контекст стартовой базы после Task 6
 
 ## Checkout и база
 
-- Ветка: `TT6-RabbitMQ`, создана от `TT6-background-export-jobs-and-worker`.
-- Проверенная база: `e548f570a08e495764494cf12064b51e3f3ee99e`.
-- Task 6 реализована и проверена; состояние используется для стартовых баз.
-  Постоянные work-rules не менялись.
+- Ветка: `feature/task-7-start`.
+- Проверенная полная база Task 6: `15e61b5dff91c88fc1ce5633ebfd4c400cad1b32`.
+- Код и тесты Task 6 сохранены полностью. Следующее задание ещё не реализовано;
+  его Task/Guide и цель нужно прочитать перед началом работы.
 
-## Существующие контракты
+## Уже реализовано
 
-- NestJS + Prisma/PostgreSQL: Controller → Service → PrismaService, feature modules.
-- POST workspace exports атомарно создаёт ExportJob + OutboxEvent и отвечает 202.
-  GET/DELETE export доступны автору либо OWNER; outsider получает hidden 404.
-- Worker проверяет membership, CAS claim, processingToken, heartbeat и cancel.
-  CSV использует keyset pages по 500, backpressure и S3 multipart adapter.
-- Каждая попытка владеет отдельным key
-  `workspaces/{workspaceId}/exports/{exportJobId}/{processingToken}.csv`.
-  Recovery/retention и file-only orphan cleanup сохраняют прежние контракты.
-- UI использует одну кнопку: подготовка → disabled QUEUED/PROCESSING → скачивание.
-  Перед скачиванием запрашивается свежая ссылка; при истечении хранения снова доступна подготовка.
+NestJS + Prisma/PostgreSQL backend с DI, feature modules и
+Controller → Service → PrismaService; React/Vite frontend.
+JWT, workspace RBAC/isolation, CRUD/search, Redis cache-aside и private-файлы Yandex S3.
 
-## Перенос
-
-- amqplib вместо BullMQ; Redis остаётся для кеша Task 4.
-- RabbitMQ: durable quorum main/DLQ, четыре TTL retry queues и отдельная lease queue.
-  Outbox ждёт publisher confirm; consumer использует prefetch 2 и manual ACK.
-- Retry/DLQ подтверждаются до ACK; ошибка оставляет исходную доставку для redelivery.
-  Пять попыток, backoff 5/10/20/40 секунд. Занятый lease не расходует budget.
-- messageId служит корреляции: RabbitMQ допускает дубликаты сообщений/DLQ.
-  Идемпотентность domain work обеспечивается PostgreSQL, а не ID брокера.
-- Схема Prisma не менялась; новая migration не нужна. UI/API сохраняются.
+- Task 5: presigned file upload/download, DocumentFile lifecycle, синхронный CSV.
+- Task 6: фоновый workspace CSV, отдельный worker и RabbitMQ через amqplib.
+  Redis используется для кеша, транспорт jobs — RabbitMQ.
+- `POST /workspaces/:workspaceId/exports` атомарно создаёт ExportJob + OutboxEvent,
+  отвечает 202; `GET/DELETE /exports/:id` доступны автору либо OWNER.
+  Для чужого workspace возвращается hidden 404.
+- Durable quorum main/DLQ, четыре TTL retry queues, lease queue,
+  publisher confirms, manual ACK/prefetch 2; пять попыток, backoff 5/10/20/40 секунд.
+  Идемпотентность обеспечивается PostgreSQL/CAS, processingToken и heartbeat.
+- CSV: keyset pages, backpressure, S3 multipart; cancel/recovery/retention выполняют
+  точечный cleanup своих attempt keys. File orphan cleanup ограничен documents namespace.
+- UI: одна кнопка подготовка → disabled QUEUED/PROCESSING → скачивание;
+  свежая ссылка перед скачиванием и возврат к подготовке при истечении хранения.
+- Prisma models ExportJob/OutboxEvent и migration Task 6 уже существуют.
+  API/worker подключены в Compose, есть отдельные debug profiles и безопасная S3-диагностика.
 
 ## Ориентиры и проверки
 
-- Код: `backend/src/queue/`, `backend/src/worker/`, Compose, `.env.example`.
-- Tests: `background-exports.e2e-spec.ts` — PostgreSQL + реальный RabbitMQ, fake storage;
-  `rabbitmq-exports.e2e-spec.ts` — confirms/ACK/retry/DLQ на mocks без сети и БД.
-- `background-export-yandex.e2e-spec.ts` — шесть opt-in сценариев с настоящим HTTPS
-  Yandex S3 (`TASK6_YANDEX_E2E=true`), выделенной тестовой БД и уникальными очередями.
-  Multipart/GET/abort/retention реальны; сбои CompleteMultipartUpload управляемые.
-- Task 6 и Guide 6 находятся во внешней папке учебных материалов, указанной ранее
-  пользователем; документы других задач не меняются.
-- Пройден 231 test с настройками Яндекса: 230 в полном прогоне и отдельный
-  degraded-сценарий Redis. Ошибок нет; условные skips проверены в соответствующем режиме.
-  Все 49 сценариев background exports прошли с настоящими PostgreSQL/RabbitMQ.
-- `test-config.ts` изолирует ConfigService от process.env: в установленной версии
-  Nest env имеет приоритет над constructor values. Очереди интеграционных тестов
-  действительно уникальны; быстрые transport tests не зависят от настроек приложения.
-- Сборка/обычный typecheck приложения отделены от тестов через tsconfig.json и
-  tsconfig.build.json; Jest использует строгий test/tsconfig.json. Проверены build и
-  typecheck копии Task 5 со всеми финальными тестами, без модулей/Prisma-типов Task 6.
-- Через Computer Usage с настоящим Yandex Object Storage проверены VIEWER,
-  завершение после ухода со страницы, отмена QUEUED/PROCESSING, успешный retry,
-  FAILED/DLQ после пяти попыток и ошибка скачивания после истечения retention.
-- Через UI скачан CSV из 40001 документа двух проектов, 7,94 MiB. Проверены все строки,
-  три статуса, BOM/escaping, отсутствие content и документов чужого workspace.
-- Облачные tests проверяют multipart >5 MiB, duplicate delivery, отмену активного MPU,
-  cleanup при retry/FAILED и точечный retention без удаления чужого control object.
-  Все созданные облачные fixtures и их записи тестовой БД очищены; итоговая проверка
-  обеих тестовых областей Яндекса: 0 объектов и 0 incomplete multipart.
-- Backend/frontend build, app/test typecheck, lint, format и Compose config прошли.
-  Linux dev image собран; manual ACK/prefetch 2 и SIGTERM exit 0 быстрее 30 с проверены.
-- Task/Guide не менялись: основные контракты согласованы; список быстрых команд
-  Guide 6 пока не включает background-export-processor.e2e-spec.ts.
+- Код: `backend/src/exports/`, `outbox/`, `queue/`, `worker/`, `storage/`,
+  `frontend/src/pages/project/ui/ProjectPage.tsx`.
+- Тесты Task 6: API/worker, processor, RabbitMQ transport, storage/shutdown/orphans;
+  `background-export-yandex.e2e-spec.ts` — opt-in настоящий Yandex S3
+  (`TASK6_YANDEX_E2E=true`), отдельная тестовая БД и уникальные очереди.
+- Пройден 231 test: 230 в полном прогоне с настройками Яндекса и отдельный Redis-down.
+  Проверены реальный multipart >5 MiB, скачивание CSV из 40001 документа через UI,
+  cancel/retry/DLQ/retention; ошибки CompleteMultipartUpload создавались управляемо.
+  Собственные облачные fixtures очищены, остаток объектов и incomplete multipart — 0.
+- Backend/frontend build, строгий app/test typecheck, lint и Compose проверены.
+  После удаления английских комментариев дополнительно пройдены 13 diagnostic tests.
+- Сборка приложения отделена от тестов через `tsconfig.build.json`;
+  Jest использует строгий `backend/test/tsconfig.json`.
+  `test-config.ts` изолирует ConfigService от process.env.
+- Проверки с записью выполняются только на выделенной тестовой БД и собственных S3 fixtures.
+  Общую схему/опубликованные migrations не переписывать без требования нового задания.
