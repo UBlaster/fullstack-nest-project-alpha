@@ -18,3 +18,10 @@ export class ExportLeaseLostError extends Error {
 		this.name = 'ExportLeaseLostError';
 	}
 }
+
+export class ExportDatabaseError extends Error {
+	constructor() {
+		super('Export database operation failed');
+		this.name = 'ExportDatabaseError';
+	}
+}

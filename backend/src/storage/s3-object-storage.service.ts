@@ -104,9 +104,6 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 		if (input.signal.aborted) throw abortError();
 		let uploadId: string | undefined;
 		let multipartAborted = false;
-		// Upload.abort() races done() against an immediate rejection, not against
-		// settlement of the S3 requests. Abort requests directly and let done()
-		// join its bounded workers before the caller can delete the attempt object.
 		const client = new Proxy(this.s3, {
 			get: (target, property) => {
 				if (property !== 'send') return Reflect.get(target, property, target);
@@ -166,7 +163,6 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 			await upload.done();
 			if (input.signal.aborted) throw abortError();
 		} catch (error) {
-			// Upload does not abort the multipart session if its final Complete fails.
 			if (uploadId && !multipartAborted) {
 				try {
 					await observeS3(

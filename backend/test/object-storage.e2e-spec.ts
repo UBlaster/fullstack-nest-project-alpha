@@ -120,12 +120,17 @@ describe('Task 5 object storage and streaming export (e2e)', () => {
 			status: 'PENDING',
 		});
 		expect(body.file.objectKey).toBeUndefined();
-		expect(body.expiresInSeconds).toBe(600);
+		const uploadTtl = Number(process.env.S3_UPLOAD_TTL_SECONDS ?? 600);
+		expect(body.expiresInSeconds).toBe(uploadTtl);
 		const uploadUrl = new URL(body.uploadUrl);
-		expect(uploadUrl.searchParams.get('X-Amz-Expires')).toBe('600');
-		expect(uploadUrl.hostname).toBe(
-			`${process.env.S3_BUCKET}.${new URL(process.env.S3_ENDPOINT!).hostname}`,
-		);
+		expect(uploadUrl.searchParams.get('X-Amz-Expires')).toBe(String(uploadTtl));
+		const endpoint = new URL(process.env.S3_ENDPOINT!);
+		if (process.env.S3_FORCE_PATH_STYLE === 'true') {
+			expect(uploadUrl.origin).toBe(endpoint.origin);
+			expect(uploadUrl.pathname.startsWith(`/${process.env.S3_BUCKET}/`)).toBe(true);
+		} else {
+			expect(uploadUrl.hostname).toBe(`${process.env.S3_BUCKET}.${endpoint.hostname}`);
+		}
 		return body;
 	};
 
@@ -383,8 +388,11 @@ describe('Task 5 object storage and streaming export (e2e)', () => {
 			.get(downloadPath(ids.document, upload.file.id))
 			.set(auth(viewerToken))
 			.expect(200);
-		expect(download.body.expiresInSeconds).toBe(300);
-		expect(new URL(download.body.downloadUrl).searchParams.get('X-Amz-Expires')).toBe('300');
+		const downloadTtl = Number(process.env.S3_DOWNLOAD_TTL_SECONDS ?? 300);
+		expect(download.body.expiresInSeconds).toBe(downloadTtl);
+		expect(new URL(download.body.downloadUrl).searchParams.get('X-Amz-Expires')).toBe(
+			String(downloadTtl),
+		);
 		const downloaded = await fetch(download.body.downloadUrl);
 		expect(downloaded.status).toBe(200);
 		expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(bytes);

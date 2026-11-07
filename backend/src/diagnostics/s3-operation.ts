@@ -26,7 +26,6 @@ function integer(
 		: null;
 }
 
-/** Observability only: no retries, SDK input/output dumps, or replacement errors. */
 export async function observeS3<T>(
 	operation: string,
 	work: () => Promise<T>,
@@ -54,7 +53,7 @@ export async function observeS3<T>(
 			if (outcome === 'error') logger.error(entry);
 			else logger.log(entry);
 		} catch {
-			// Logging must never change the result of an S3 operation.
+			return;
 		}
 	};
 	let result: T;

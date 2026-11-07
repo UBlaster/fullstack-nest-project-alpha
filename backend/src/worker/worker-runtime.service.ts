@@ -1,128 +1,225 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ExportJobStatus } from '@prisma/client';
-import { Job, Worker } from 'bullmq';
-import Redis from 'ioredis';
+import { Channel, ConsumeMessage } from 'amqplib';
 import { ExportMaintenanceService } from './export-maintenance.service';
 import { ExportProcessorService } from './export-processor.service';
+import { ExportDatabaseError, ExportLeaseLostError, PermanentExportError } from './export-errors';
 import { PrismaService } from '../prisma/prisma.service';
-import { ExportQueuePayload } from '../queue/queue.constants';
+import { ExportQueueJob, exportQueueAttempts } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
 
 @Injectable()
 export class WorkerRuntimeService {
 	private readonly logger = new Logger(WorkerRuntimeService.name);
-	private readonly redisUrl: string;
-	private readonly queueName: string;
-	private readonly pendingDeadLetters = new Set<Promise<void>>();
-	private connection?: Redis;
-	private worker?: Worker<ExportQueuePayload>;
-	private reconciliationTimer?: NodeJS.Timeout;
-	private reconciliation?: Promise<void>;
-	private failedCursor = 0;
+	private readonly pending = new Set<Promise<void>>();
+	private channel?: Channel;
+	private consumerTag?: string;
+	private reconnectTimer?: NodeJS.Timeout;
+	private connecting?: Promise<void>;
+	private stopping = true;
 
 	constructor(
-		config: ConfigService,
+		_config: ConfigService,
 		private readonly processor: ExportProcessorService,
 		private readonly maintenance: ExportMaintenanceService,
 		private readonly prisma: PrismaService,
 		private readonly queues: QueueService,
-	) {
-		this.redisUrl = config.get<string>('REDIS_URL') ?? '';
-		if (!this.redisUrl) throw new Error('REDIS_URL is required for BullMQ worker');
-		this.queueName = config.get<string>('EXPORT_QUEUE_NAME') ?? 'workspace-exports';
-	}
+	) {}
 
 	start(): void {
-		if (this.worker) return;
-		this.connection = new Redis(this.redisUrl, { maxRetriesPerRequest: null });
-		this.worker = new Worker<ExportQueuePayload>(
-			this.queueName,
-			(job) => this.processor.process(job),
-			{ connection: this.connection, concurrency: 2 },
-		);
-		this.worker.on('error', (error) => {
-			this.logger.error(`BullMQ worker error: ${error.name}`);
-		});
-		this.worker.on('failed', (job) => {
-			if (job) {
-				const pending = this.publishDeadLetter(job);
-				this.pendingDeadLetters.add(pending);
-				void pending.finally(() => this.pendingDeadLetters.delete(pending));
-			}
-		});
+		if (!this.stopping) return;
+		this.stopping = false;
 		this.maintenance.start();
-		this.reconciliationTimer = setInterval(() => void this.reconcileFailed(), 30_000);
-		this.reconciliationTimer.unref();
-		void this.reconcileFailed();
+		this.connect();
 	}
 
-	// Retained failed queue jobs provide durable retry evidence if the process
-	// dies between broker failure, the DB transition and DLQ publication.
-	reconcileFailed(): Promise<void> {
-		if (this.reconciliation) return this.reconciliation;
-		this.reconciliation = (async () => {
-			try {
-				const jobs = await this.queues.getFailed(this.failedCursor, this.failedCursor + 99);
-				for (const job of jobs) await this.publishDeadLetter(job);
-				this.failedCursor = jobs.length < 100 ? 0 : this.failedCursor + jobs.length;
-			} catch (error) {
-				this.logger.warn(
-					`Failed-job reconciliation failed: ${error instanceof Error ? error.name : 'UnknownError'}`,
-				);
+	private connect(): void {
+		if (this.stopping || this.connecting || this.channel) return;
+		this.connecting = this.consume()
+			.catch(() => {
+				this.logger.warn('RabbitMQ consumer unavailable; reconnecting');
+				this.scheduleReconnect();
+			})
+			.finally(() => {
+				this.connecting = undefined;
+			});
+	}
+
+	private async consume(): Promise<void> {
+		await Promise.allSettled([...this.pending]);
+		if (this.stopping) return;
+		const channel = await this.queues.createConsumerChannel();
+		let closed = false;
+		channel.on('error', () => this.logger.warn('RabbitMQ consumer channel error'));
+		channel.on('close', () => {
+			closed = true;
+			if (this.channel === channel) {
+				this.channel = undefined;
+				this.consumerTag = undefined;
+				this.scheduleReconnect();
 			}
-		})().finally(() => {
-			this.reconciliation = undefined;
 		});
-		return this.reconciliation;
+		this.channel = channel;
+		try {
+			await channel.prefetch(2);
+			if (closed) throw new Error('RabbitMQConsumerClosed');
+			if (this.stopping) {
+				await channel.close();
+				return;
+			}
+			const consumer = await channel.consume(
+				this.queues.queueName,
+				(message) => {
+					if (!message) {
+						void channel.close().catch(() => {});
+						return;
+					}
+					if (this.stopping || closed) return;
+					const pending = this.handleDelivery(channel, message).catch(() => {
+						this.logger.warn('RabbitMQ delivery unfinished; requeueing on channel close');
+						return channel.close().catch(() => {});
+					});
+					this.pending.add(pending);
+					void pending.finally(() => this.pending.delete(pending));
+				},
+				{ noAck: false },
+			);
+			if (closed) throw new Error('RabbitMQConsumerClosed');
+			this.consumerTag = consumer.consumerTag;
+		} catch (error) {
+			await channel.close().catch(() => {});
+			throw error;
+		}
+	}
+
+	private scheduleReconnect(): void {
+		if (this.stopping || this.reconnectTimer) return;
+		this.reconnectTimer = setTimeout(() => {
+			this.reconnectTimer = undefined;
+			this.connect();
+		}, 1_000);
+		this.reconnectTimer.unref();
 	}
 
 	async close(force = false): Promise<void> {
-		if (this.reconciliationTimer) clearInterval(this.reconciliationTimer);
-		this.reconciliationTimer = undefined;
-		const worker = this.worker;
-		await Promise.all([worker?.close(force), this.maintenance.stop()]);
-		await Promise.allSettled([...this.pendingDeadLetters]);
-		await this.reconciliation;
-		this.worker = undefined;
-		if (this.connection) {
-			if (this.connection.status === 'ready') await this.connection.quit();
-			else this.connection.disconnect();
-			this.connection = undefined;
-		}
+		this.stopping = true;
+		if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+		this.reconnectTimer = undefined;
+		await this.connecting;
+		const channel = this.channel;
+		if (channel && this.consumerTag) await channel.cancel(this.consumerTag).catch(() => {});
+		if (force) await channel?.close().catch(() => {});
+		await Promise.allSettled([...this.pending]);
+		await this.maintenance.stop();
+		if (!force) await channel?.close().catch(() => {});
+		this.channel = undefined;
+		this.consumerTag = undefined;
 	}
 
-	private async publishDeadLetter(queueJob: Job<ExportQueuePayload>): Promise<void> {
+	private async handleDelivery(channel: Channel, message: ConsumeMessage): Promise<void> {
+		let job: ExportQueueJob;
 		try {
-			if ((await queueJob.getState()) !== 'failed') return;
-			const exportJobId = queueJob.data.exportJobId;
-			const sourceQueueJobId = queueJob.id ?? exportJobId;
-			await this.prisma.exportJob.updateMany({
-				where: { id: exportJobId, queueJobId: sourceQueueJobId, status: ExportJobStatus.QUEUED },
-				data: {
-					status: ExportJobStatus.FAILED,
-					errorCode: 'RETRIES_EXHAUSTED',
-					finishedAt: new Date(),
-				},
-			});
-			const job = await this.prisma.exportJob.findUnique({
-				where: { id: exportJobId },
-				select: { status: true, errorCode: true },
-			});
-			if (job?.status !== ExportJobStatus.FAILED) return;
+			job = parseExportMessage(message);
+		} catch {
+			await this.queues.addDeadLetter(
+				createDeadLetterPayload('invalid-message', 'invalid-message', 0, 'INVALID_FILTERS'),
+			);
+			channel.ack(message);
+			return;
+		}
+		const queueJobId = message.properties.messageId as string;
+		let failure: unknown;
+		try {
+			await this.processor.process(job);
+		} catch (error) {
+			failure = error;
+		}
+		if (failure instanceof ExportDatabaseError) throw failure;
+		const current = await this.prisma.exportJob.findUnique({ where: { id: job.data.exportJobId } });
+		if (!current) {
 			await this.queues.addDeadLetter(
 				createDeadLetterPayload(
-					exportJobId,
-					sourceQueueJobId,
-					queueJob.attemptsMade,
-					job.errorCode,
+					job.data.exportJobId,
+					queueJobId,
+					job.attemptsMade,
+					'INVALID_FILTERS',
 				),
 			);
-		} catch (error) {
-			const name = error instanceof Error ? error.name : 'UnknownError';
-			this.logger.error(`DLQ publish failed: ${name}`);
+			channel.ack(message);
+			return;
 		}
+		if (current.queueJobId !== queueJobId) throw new Error('ExportMessageIdMismatch');
+		if (
+			current?.status === ExportJobStatus.COMPLETED ||
+			current?.status === ExportJobStatus.CANCELLED
+		) {
+			channel.ack(message);
+			return;
+		}
+		if (!failure && current.status !== ExportJobStatus.FAILED)
+			throw new Error('ExportProcessorResolvedBeforeTerminalState');
+		const attempts = Math.max(job.attemptsMade + 1, current?.attempts ?? 0);
+		if (current?.status === ExportJobStatus.PROCESSING || failure instanceof ExportLeaseLostError) {
+			await this.queues.deferExport(job.data, queueJobId, job.attemptsMade);
+		} else if (
+			current?.status === ExportJobStatus.FAILED ||
+			failure instanceof PermanentExportError ||
+			attempts >= exportQueueAttempts
+		) {
+			const errorCode =
+				current?.status === ExportJobStatus.FAILED
+					? current.errorCode
+					: failure instanceof PermanentExportError
+						? failure.code
+						: 'RETRIES_EXHAUSTED';
+			if (current?.status === ExportJobStatus.QUEUED) {
+				await this.prisma.exportJob.updateMany({
+					where: {
+						id: current.id,
+						queueJobId,
+						status: ExportJobStatus.QUEUED,
+						attempts: current.attempts,
+						objectKey: current.objectKey,
+					},
+					data: { status: ExportJobStatus.FAILED, errorCode, finishedAt: new Date() },
+				});
+				const latest = await this.prisma.exportJob.findUniqueOrThrow({ where: { id: current.id } });
+				if (latest.status !== ExportJobStatus.FAILED) {
+					await this.queues.deferExport(job.data, queueJobId, job.attemptsMade);
+					channel.ack(message);
+					return;
+				}
+			}
+			await this.queues.addDeadLetter(
+				createDeadLetterPayload(job.data.exportJobId, queueJobId, attempts, errorCode),
+			);
+		} else {
+			await this.queues.addRetry(job.data, queueJobId, attempts);
+		}
+		channel.ack(message);
 	}
+}
+
+export function parseExportMessage(message: ConsumeMessage): ExportQueueJob {
+	const payload: unknown = JSON.parse(message.content.toString('utf8'));
+	const attemptsMade: unknown = message.properties.headers?.['x-export-attempts'] ?? 0;
+	if (
+		typeof payload !== 'object' ||
+		payload === null ||
+		!('exportJobId' in payload) ||
+		typeof payload.exportJobId !== 'string' ||
+		!/^[a-zA-Z0-9-]{1,200}$/.test(payload.exportJobId) ||
+		!('schemaVersion' in payload) ||
+		payload.schemaVersion !== 1 ||
+		message.properties.messageId !== 'export-' + payload.exportJobId ||
+		typeof attemptsMade !== 'number' ||
+		!Number.isInteger(attemptsMade) ||
+		attemptsMade < 0 ||
+		attemptsMade >= exportQueueAttempts
+	)
+		throw new Error('InvalidExportMessage');
+	return { data: { exportJobId: payload.exportJobId, schemaVersion: 1 }, attemptsMade };
 }
 
 export function createDeadLetterPayload(
@@ -131,10 +228,11 @@ export function createDeadLetterPayload(
 	attempts: number,
 	errorCode: string | null,
 ) {
+	const allowed = ['INVALID_FILTERS', 'MEMBERSHIP_REVOKED', 'RETRIES_EXHAUSTED'];
 	return {
 		exportJobId,
 		sourceQueueJobId,
 		attempts,
-		errorCode: errorCode ?? 'INTERNAL_ERROR',
+		errorCode: errorCode && allowed.includes(errorCode) ? errorCode : 'INTERNAL_ERROR',
 	};
 }

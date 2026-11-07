@@ -1,6 +1,11 @@
 export const exportQueueAttempts = 5;
 export const exportQueueBackoffMs = 5_000;
 
+export interface ExportQueueJob {
+	data: ExportQueuePayload;
+	attemptsMade: number;
+}
+
 export interface ExportQueuePayload {
 	exportJobId: string;
 	schemaVersion: 1;

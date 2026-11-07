@@ -26,6 +26,8 @@ export function ProjectPage() {
 	const activeExportJob = exportJob?.projectId === id ? exportJob : null;
 	const exportJobId = activeExportJob?.id;
 	const exportJobStatus = activeExportJob?.status;
+	const isExportReady = exportJobStatus === 'COMPLETED' && !!activeExportJob?.downloadUrl;
+	const isExportPreparing = exportJobStatus === 'QUEUED' || exportJobStatus === 'PROCESSING';
 	const load = useCallback(
 		() =>
 			api('/projects/' + id)
@@ -132,20 +134,26 @@ export function ProjectPage() {
 				<h2>Документы ({documents.length})</h2>
 				<button
 					type="button"
-					disabled={
-						isExporting ||
-						activeExportJob?.status === 'QUEUED' ||
-						activeExportJob?.status === 'PROCESSING'
-					}
+					disabled={isExporting || isExportPreparing}
 					onClick={async () => {
 						setIsExporting(true);
 						setExportError('');
 						try {
-							const created = await api(`/workspaces/${project.workspaceId}/exports`, {
-								method: 'POST',
-								body: JSON.stringify({}),
-							});
-							setExportJob({ ...created, projectId: id, errorCode: null, downloadUrl: null });
+							if (activeExportJob?.status === 'COMPLETED' && activeExportJob.downloadUrl) {
+								const current = await api(`/exports/${activeExportJob.id}`);
+								setExportJob((previous) =>
+									previous?.id === activeExportJob.id ? { ...current, projectId: id } : previous,
+								);
+								if (!current.downloadUrl)
+									throw new Error('Срок хранения экспорта истёк. Подготовьте новый CSV.');
+								downloadPresignedUrl(current.downloadUrl);
+							} else {
+								const created = await api(`/workspaces/${project.workspaceId}/exports`, {
+									method: 'POST',
+									body: JSON.stringify({}),
+								});
+								setExportJob({ ...created, projectId: id, errorCode: null, downloadUrl: null });
+							}
 						} catch (error) {
 							setExportError(error instanceof Error ? error.message : 'Ошибка экспорта');
 						} finally {
@@ -153,7 +161,15 @@ export function ProjectPage() {
 						}
 					}}
 				>
-					{isExporting ? 'Запуск...' : 'Подготовить CSV workspace'}
+					{isExporting
+						? isExportReady
+							? 'Скачивание...'
+							: 'Запуск...'
+						: isExportReady
+							? 'Скачать готовый CSV'
+							: isExportPreparing
+								? 'Подготовка CSV...'
+								: 'Подготовить CSV workspace'}
 				</button>
 			</div>
 			{exportError && <p className="error">{exportError}</p>}
@@ -185,28 +201,6 @@ export function ProjectPage() {
 							}}
 						>
 							Отменить
-						</button>
-					)}
-					{activeExportJob.status === 'COMPLETED' && activeExportJob.downloadUrl && (
-						<button
-							type="button"
-							onClick={async () => {
-								try {
-									setExportError('');
-									// Polling stops at completion; the original signed URL may
-									// already be expired when the user clicks Download.
-									const current = await api(`/exports/${activeExportJob.id}`);
-									if (!current.downloadUrl)
-										throw new Error('Срок хранения экспорта истёк. Подготовьте новый CSV.');
-									downloadPresignedUrl(current.downloadUrl);
-								} catch (error) {
-									setExportError(
-										error instanceof Error ? error.message : 'Ошибка скачивания экспорта',
-									);
-								}
-							}}
-						>
-							Скачать готовый CSV
 						</button>
 					)}
 				</div>

@@ -165,7 +165,6 @@ describe('Task 6 streaming storage (real AWS Upload, no network)', () => {
 				settled = true;
 			});
 		try {
-			// Race also lets an incorrect early rejection fail without hanging the test.
 			await Promise.race([cleanupEntered.promise, uploading]);
 			expect(commands.some((command) => command instanceof AbortMultipartUploadCommand)).toBe(true);
 			expect(settled).toBe(false);

@@ -4,16 +4,20 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Injectable, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ExportJob, ExportJobStatus } from '@prisma/client';
-import { DelayedError, Job, UnrecoverableError } from 'bullmq';
 import {
 	DocumentsExportService,
 	csvLine,
 	exportBatchSize,
 } from '../documents/documents-export.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { ExportQueuePayload, exportQueueAttempts } from '../queue/queue.constants';
+import { ExportQueueJob, exportQueueAttempts } from '../queue/queue.constants';
 import { OBJECT_STORAGE, ObjectStorageService } from '../storage/storage.tokens';
-import { CancelledExportError, ExportLeaseLostError, PermanentExportError } from './export-errors';
+import {
+	CancelledExportError,
+	ExportDatabaseError,
+	ExportLeaseLostError,
+	PermanentExportError,
+} from './export-errors';
 
 interface ClaimedExport extends ExportJob {
 	processingToken: string;
@@ -34,30 +38,37 @@ export class ExportProcessorService {
 		this.retentionMs = this.positiveInteger(config, 'EXPORT_RETENTION_MS', 86_400_000);
 	}
 
-	async process(job: Job<ExportQueuePayload>): Promise<void> {
+	async process(job: ExportQueueJob): Promise<void> {
 		if (job.data.schemaVersion !== 1 || typeof job.data.exportJobId !== 'string') {
-			throw new UnrecoverableError('INVALID_FILTERS');
+			throw new PermanentExportError('INVALID_FILTERS');
 		}
-		const current = await this.prisma.exportJob.findUnique({
-			where: { id: job.data.exportJobId },
-		});
-		if (!current) throw new UnrecoverableError('INVALID_FILTERS');
+		const current = await this.database(() =>
+			this.prisma.exportJob.findUnique({
+				where: { id: job.data.exportJobId },
+			}),
+		);
+		if (!current) throw new PermanentExportError('INVALID_FILTERS');
 		if (this.isTerminal(current.status)) return;
-		const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? exportQueueAttempts);
+		if (current.status === ExportJobStatus.PROCESSING) throw new ExportLeaseLostError();
+		if (current.attempts >= exportQueueAttempts) {
+			await this.failQueued(current, 'RETRIES_EXHAUSTED');
+			throw new PermanentExportError('RETRIES_EXHAUSTED');
+		}
+		const finalAttempt = Math.max(job.attemptsMade, current.attempts) + 1 >= exportQueueAttempts;
 
 		if (current.cancelRequestedAt && current.status === ExportJobStatus.QUEUED) {
 			try {
 				await this.cancelQueued(current);
 				return;
 			} catch (error) {
+				if (error instanceof ExportDatabaseError || error instanceof ExportLeaseLostError)
+					throw error;
 				await this.recordQueuedCleanupFailure(current, finalAttempt);
 				throw error;
 			}
 		}
 
 		try {
-			// Preserve the last attempt's key until cleanup succeeds. In particular,
-			// recovery or a failed delete must not lose the only durable reference.
 			if (current.status === ExportJobStatus.QUEUED && current.objectKey) {
 				await this.storage.remove(current.objectKey);
 			}
@@ -69,26 +80,28 @@ export class ExportProcessorService {
 
 		const claim = await this.claim(current);
 		if (!claim) {
-			const latest = await this.prisma.exportJob.findUnique({ where: { id: current.id } });
+			const latest = await this.database(() =>
+				this.prisma.exportJob.findUnique({ where: { id: current.id } }),
+			);
 			if (latest && this.isTerminal(latest.status)) return;
-			// A stalled BullMQ delivery may arrive before the five-minute DB recovery.
-			// Delay without consuming a retry or acknowledging unfinished domain work.
-			if (job.token) {
-				await job.moveToDelayed(Date.now() + this.heartbeatThrottleMs, job.token);
-				throw new DelayedError();
-			}
+
 			throw new ExportLeaseLostError();
 		}
 
 		try {
 			await this.buildAndStore(claim);
 		} catch (error) {
+			if (error instanceof ExportDatabaseError) throw error;
 			if (error instanceof CancelledExportError) {
 				try {
 					await this.finishCancelled(claim);
 					return;
 				} catch (cleanupError) {
-					if (cleanupError instanceof ExportLeaseLostError) throw cleanupError;
+					if (
+						cleanupError instanceof ExportDatabaseError ||
+						cleanupError instanceof ExportLeaseLostError
+					)
+						throw cleanupError;
 					await this.finishCleanupFailure(claim, finalAttempt);
 					throw cleanupError;
 				}
@@ -99,7 +112,7 @@ export class ExportProcessorService {
 			}
 			if (error instanceof PermanentExportError) {
 				await this.finishFailed(claim, error.code);
-				throw new UnrecoverableError(error.code);
+				throw error;
 			}
 
 			const code = finalAttempt ? 'RETRIES_EXHAUSTED' : this.classifyTransient(error);
@@ -116,27 +129,28 @@ export class ExportProcessorService {
 	}
 
 	async claim(current: ExportJob, now = new Date()): Promise<ClaimedExport | null> {
+		if (current.attempts >= exportQueueAttempts) return null;
 		const processingToken = randomUUID();
-		// Fence S3 writes too: a recovered old worker must not overwrite or delete
-		// the winning attempt's file. The exact key remains persisted for cleanup.
 		const objectKey = `workspaces/${current.workspaceId}/exports/${current.id}/${processingToken}.csv`;
-		const claimed = await this.prisma.exportJob.updateMany({
-			where: {
-				id: current.id,
-				status: ExportJobStatus.QUEUED,
-				cancelRequestedAt: null,
-				attempts: current.attempts,
-			},
-			data: {
-				status: ExportJobStatus.PROCESSING,
-				processingToken,
-				objectKey,
-				heartbeatAt: now,
-				startedAt: current.startedAt ?? now,
-				attempts: { increment: 1 },
-				errorCode: null,
-			},
-		});
+		const claimed = await this.database(() =>
+			this.prisma.exportJob.updateMany({
+				where: {
+					id: current.id,
+					status: ExportJobStatus.QUEUED,
+					cancelRequestedAt: null,
+					attempts: current.attempts,
+				},
+				data: {
+					status: ExportJobStatus.PROCESSING,
+					processingToken,
+					objectKey,
+					heartbeatAt: now,
+					startedAt: current.startedAt ?? now,
+					attempts: { increment: 1 },
+					errorCode: null,
+				},
+			}),
+		);
 		if (claimed.count === 0) return null;
 		return {
 			...current,
@@ -165,9 +179,11 @@ export class ExportProcessorService {
 		});
 		let monitorError: unknown;
 		const produce = async () => {
-			total = await this.prisma.document.count({
-				where: { project: { workspaceId: claim.workspaceId } },
-			});
+			total = await this.database(() =>
+				this.prisma.document.count({
+					where: { project: { workspaceId: claim.workspaceId } },
+				}),
+			);
 			await this.writeChunk(
 				output,
 				'\uFEFFid,projectId,title,status,authorName,updatedAt\r\n',
@@ -180,7 +196,7 @@ export class ExportProcessorService {
 				if (processed % exportBatchSize === 0) {
 					await this.assertActive(claim);
 				}
-				const next = await iterator.next();
+				const next = await this.database(() => iterator.next());
 				if (next.done) break;
 				const row = next.value;
 				await this.writeChunk(
@@ -212,35 +228,38 @@ export class ExportProcessorService {
 		} catch (error) {
 			controller.abort();
 			output.destroy();
-			// Promise.all rejects at the first failure; its rejection does not mean
-			// the sibling upload has stopped writing. Settle both before cleanup.
 			await Promise.allSettled([producer, upload]);
 			throw monitorError ?? error;
 		} finally {
 			monitorController.abort();
 			await Promise.allSettled([monitor]);
 		}
+		if (monitorError) throw monitorError;
 
 		const finishedAt = new Date();
-		const completed = await this.prisma.exportJob.updateMany({
-			where: {
-				id: claim.id,
-				status: ExportJobStatus.PROCESSING,
-				processingToken: claim.processingToken,
-				cancelRequestedAt: null,
-			},
-			data: {
-				status: ExportJobStatus.COMPLETED,
-				progress: 100,
-				objectKey,
-				finishedAt,
-				expiresAt: new Date(finishedAt.getTime() + this.retentionMs),
-				heartbeatAt: null,
-				processingToken: null,
-			},
-		});
+		const completed = await this.database(() =>
+			this.prisma.exportJob.updateMany({
+				where: {
+					id: claim.id,
+					status: ExportJobStatus.PROCESSING,
+					processingToken: claim.processingToken,
+					cancelRequestedAt: null,
+				},
+				data: {
+					status: ExportJobStatus.COMPLETED,
+					progress: 100,
+					objectKey,
+					finishedAt,
+					expiresAt: new Date(finishedAt.getTime() + this.retentionMs),
+					heartbeatAt: null,
+					processingToken: null,
+				},
+			}),
+		);
 		if (completed.count === 0) {
-			const state = await this.prisma.exportJob.findUnique({ where: { id: claim.id } });
+			const state = await this.database(() =>
+				this.prisma.exportJob.findUnique({ where: { id: claim.id } }),
+			);
 			if (state?.cancelRequestedAt && state.processingToken === claim.processingToken) {
 				await this.storage.remove(objectKey);
 				throw new CancelledExportError();
@@ -277,10 +296,12 @@ export class ExportProcessorService {
 	}
 
 	private async assertActive(claim: ClaimedExport): Promise<void> {
-		const current = await this.prisma.exportJob.findUnique({
-			where: { id: claim.id },
-			select: { status: true, processingToken: true, cancelRequestedAt: true },
-		});
+		const current = await this.database(() =>
+			this.prisma.exportJob.findUnique({
+				where: { id: claim.id },
+				select: { status: true, processingToken: true, cancelRequestedAt: true },
+			}),
+		);
 		if (current?.processingToken !== claim.processingToken) throw new ExportLeaseLostError();
 		if (current.status !== ExportJobStatus.PROCESSING) throw new ExportLeaseLostError();
 		if (current.cancelRequestedAt) throw new CancelledExportError();
@@ -293,15 +314,17 @@ export class ExportProcessorService {
 		now: Date,
 	): Promise<void> {
 		const progress = total === 0 ? 99 : Math.min(99, Math.floor((processed * 100) / total));
-		const updated = await this.prisma.exportJob.updateMany({
-			where: {
-				id: claim.id,
-				status: ExportJobStatus.PROCESSING,
-				processingToken: claim.processingToken,
-				cancelRequestedAt: null,
-			},
-			data: { heartbeatAt: now, progress },
-		});
+		const updated = await this.database(() =>
+			this.prisma.exportJob.updateMany({
+				where: {
+					id: claim.id,
+					status: ExportJobStatus.PROCESSING,
+					processingToken: claim.processingToken,
+					cancelRequestedAt: null,
+				},
+				data: { heartbeatAt: now, progress },
+			}),
+		);
 		if (updated.count === 0) await this.assertActive(claim);
 	}
 
@@ -332,16 +355,20 @@ export class ExportProcessorService {
 	}
 
 	private async assertMembership(job: ExportJob): Promise<void> {
-		const workspace = await this.prisma.workspace.findUnique({ where: { id: job.workspaceId } });
+		const workspace = await this.database(() =>
+			this.prisma.workspace.findUnique({ where: { id: job.workspaceId } }),
+		);
 		if (!workspace) throw new PermanentExportError('INVALID_FILTERS');
-		const membership = await this.prisma.workspaceMember.findUnique({
-			where: {
-				userId_workspaceId: {
-					userId: job.requestedById,
-					workspaceId: job.workspaceId,
+		const membership = await this.database(() =>
+			this.prisma.workspaceMember.findUnique({
+				where: {
+					userId_workspaceId: {
+						userId: job.requestedById,
+						workspaceId: job.workspaceId,
+					},
 				},
-			},
-		});
+			}),
+		);
 		if (!membership) throw new PermanentExportError('MEMBERSHIP_REVOKED');
 	}
 
@@ -359,99 +386,134 @@ export class ExportProcessorService {
 	private async cancelQueued(job: ExportJob): Promise<void> {
 		if (job.objectKey) await this.storage.remove(job.objectKey);
 		const now = new Date();
-		await this.prisma.exportJob.updateMany({
-			where: { id: job.id, status: ExportJobStatus.QUEUED, cancelRequestedAt: { not: null } },
-			data: { status: ExportJobStatus.CANCELLED, finishedAt: now, objectKey: null },
-		});
+		const cancelled = await this.database(() =>
+			this.prisma.exportJob.updateMany({
+				where: {
+					id: job.id,
+					status: ExportJobStatus.QUEUED,
+					attempts: job.attempts,
+					objectKey: job.objectKey,
+					cancelRequestedAt: { not: null },
+				},
+				data: { status: ExportJobStatus.CANCELLED, finishedAt: now, objectKey: null },
+			}),
+		);
+		if (cancelled.count === 0) throw new ExportLeaseLostError();
 	}
 
 	private async recordQueuedCleanupFailure(job: ExportJob, finalAttempt: boolean): Promise<void> {
 		const attempts = job.attempts + 1;
-		await this.prisma.exportJob.updateMany({
-			where: {
-				id: job.id,
-				status: ExportJobStatus.QUEUED,
-				cancelRequestedAt: { not: null },
-			},
-			data: finalAttempt
-				? {
-						status: ExportJobStatus.FAILED,
-						attempts,
-						errorCode: 'RETRIES_EXHAUSTED',
-						finishedAt: new Date(),
-					}
-				: { attempts, errorCode: 'STORAGE_UNAVAILABLE' },
-		});
+		const updated = await this.database(() =>
+			this.prisma.exportJob.updateMany({
+				where: {
+					id: job.id,
+					status: ExportJobStatus.QUEUED,
+					attempts: job.attempts,
+					objectKey: job.objectKey,
+					cancelRequestedAt: { not: null },
+				},
+				data: finalAttempt
+					? {
+							status: ExportJobStatus.FAILED,
+							attempts,
+							errorCode: 'RETRIES_EXHAUSTED',
+							finishedAt: new Date(),
+						}
+					: { attempts, errorCode: 'STORAGE_UNAVAILABLE' },
+			}),
+		);
+		if (updated.count === 0) throw new ExportLeaseLostError();
 	}
 
 	private async finishCancelled(claim: ClaimedExport): Promise<void> {
 		await this.storage.remove(this.objectKey(claim));
-		const cancelled = await this.prisma.exportJob.updateMany({
-			where: {
-				id: claim.id,
-				status: ExportJobStatus.PROCESSING,
-				processingToken: claim.processingToken,
-				cancelRequestedAt: { not: null },
-			},
-			data: {
-				status: ExportJobStatus.CANCELLED,
-				objectKey: null,
-				finishedAt: new Date(),
-				heartbeatAt: null,
-				processingToken: null,
-			},
-		});
+		const cancelled = await this.database(() =>
+			this.prisma.exportJob.updateMany({
+				where: {
+					id: claim.id,
+					status: ExportJobStatus.PROCESSING,
+					processingToken: claim.processingToken,
+					cancelRequestedAt: { not: null },
+				},
+				data: {
+					status: ExportJobStatus.CANCELLED,
+					objectKey: null,
+					finishedAt: new Date(),
+					heartbeatAt: null,
+					processingToken: null,
+				},
+			}),
+		);
 		if (cancelled.count === 0) throw new ExportLeaseLostError();
 	}
 
-	private async failQueued(id: string, errorCode: string): Promise<void> {
-		await this.prisma.exportJob.updateMany({
-			where: { id, status: ExportJobStatus.QUEUED },
-			data: { status: ExportJobStatus.FAILED, errorCode, finishedAt: new Date() },
-		});
+	private async failQueued(job: ExportJob, errorCode: string): Promise<void> {
+		const failed = await this.database(() =>
+			this.prisma.exportJob.updateMany({
+				where: {
+					id: job.id,
+					status: ExportJobStatus.QUEUED,
+					attempts: job.attempts,
+					objectKey: job.objectKey,
+				},
+				data: { status: ExportJobStatus.FAILED, errorCode, finishedAt: new Date() },
+			}),
+		);
+		if (failed.count === 0) throw new ExportLeaseLostError();
 	}
 
 	private async handlePreClaimFailure(
-		queueJob: Job<ExportQueuePayload>,
+		queueJob: ExportQueueJob,
 		job: ExportJob,
 		error: unknown,
 	): Promise<never> {
+		if (error instanceof ExportDatabaseError || error instanceof ExportLeaseLostError) throw error;
 		if (error instanceof PermanentExportError) {
-			await this.failQueued(job.id, error.code);
-			throw new UnrecoverableError(error.code);
+			await this.failQueued(job, error.code);
+			throw error;
 		}
 
-		const finalAttempt = queueJob.attemptsMade + 1 >= (queueJob.opts.attempts ?? 1);
+		const finalAttempt = Math.max(queueJob.attemptsMade, job.attempts) + 1 >= exportQueueAttempts;
 		const errorCode = finalAttempt ? 'RETRIES_EXHAUSTED' : this.classifyTransient(error);
-		await this.prisma.exportJob.updateMany({
-			where: { id: job.id, status: ExportJobStatus.QUEUED },
-			data: finalAttempt
-				? {
-						status: ExportJobStatus.FAILED,
-						attempts: { increment: 1 },
-						errorCode,
-						finishedAt: new Date(),
-					}
-				: { attempts: { increment: 1 }, errorCode },
-		});
+		const updated = await this.database(() =>
+			this.prisma.exportJob.updateMany({
+				where: {
+					id: job.id,
+					status: ExportJobStatus.QUEUED,
+					attempts: job.attempts,
+					objectKey: job.objectKey,
+				},
+				data: finalAttempt
+					? {
+							status: ExportJobStatus.FAILED,
+							attempts: { increment: 1 },
+							errorCode,
+							finishedAt: new Date(),
+						}
+					: { attempts: { increment: 1 }, errorCode },
+			}),
+		);
+		if (updated.count === 0) throw new ExportLeaseLostError();
 		throw error instanceof Error ? error : new Error('Unknown pre-claim export failure');
 	}
 
 	private async finishFailed(claim: ClaimedExport, errorCode: string): Promise<void> {
-		const failed = await this.prisma.exportJob.updateMany({
-			where: {
-				id: claim.id,
-				status: ExportJobStatus.PROCESSING,
-				processingToken: claim.processingToken,
-			},
-			data: {
-				status: ExportJobStatus.FAILED,
-				errorCode,
-				finishedAt: new Date(),
-				heartbeatAt: null,
-				processingToken: null,
-			},
-		});
+		const failed = await this.database(() =>
+			this.prisma.exportJob.updateMany({
+				where: {
+					id: claim.id,
+					status: ExportJobStatus.PROCESSING,
+					processingToken: claim.processingToken,
+				},
+				data: {
+					status: ExportJobStatus.FAILED,
+					errorCode,
+					finishedAt: new Date(),
+					heartbeatAt: null,
+					processingToken: null,
+				},
+			}),
+		);
 		if (failed.count === 0) throw new ExportLeaseLostError();
 	}
 
@@ -464,19 +526,21 @@ export class ExportProcessorService {
 	}
 
 	private async releaseForRetry(claim: ClaimedExport, errorCode: string): Promise<void> {
-		const released = await this.prisma.exportJob.updateMany({
-			where: {
-				id: claim.id,
-				status: ExportJobStatus.PROCESSING,
-				processingToken: claim.processingToken,
-			},
-			data: {
-				status: ExportJobStatus.QUEUED,
-				errorCode,
-				heartbeatAt: null,
-				processingToken: null,
-			},
-		});
+		const released = await this.database(() =>
+			this.prisma.exportJob.updateMany({
+				where: {
+					id: claim.id,
+					status: ExportJobStatus.PROCESSING,
+					processingToken: claim.processingToken,
+				},
+				data: {
+					status: ExportJobStatus.QUEUED,
+					errorCode,
+					heartbeatAt: null,
+					processingToken: null,
+				},
+			}),
+		);
 		if (released.count === 0) throw new ExportLeaseLostError();
 	}
 
@@ -495,6 +559,14 @@ export class ExportProcessorService {
 			status === ExportJobStatus.FAILED ||
 			status === ExportJobStatus.CANCELLED
 		);
+	}
+
+	private async database<T>(operation: () => PromiseLike<T>): Promise<T> {
+		try {
+			return await operation();
+		} catch {
+			throw new ExportDatabaseError();
+		}
 	}
 
 	private classifyTransient(error: unknown): string {

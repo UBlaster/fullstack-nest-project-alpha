@@ -3,19 +3,23 @@ import * as crypto from 'node:crypto';
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
-import { ExportJobStatus, OutboxEventType, WorkspaceRole } from '@prisma/client';
+import { DocumentStatus, ExportJobStatus, OutboxEventType, WorkspaceRole } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { Job, Queue } from 'bullmq';
-import Redis from 'ioredis';
+import { Channel } from 'amqplib';
 import * as request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { ExportMaintenanceService } from '../src/worker/export-maintenance.service';
 import { ExportProcessorService } from '../src/worker/export-processor.service';
+import { ExportDatabaseError } from '../src/worker/export-errors';
 import { DocumentsExportService } from '../src/documents/documents-export.service';
 import { ExportsService } from '../src/exports/exports.service';
 import { OutboxDispatcherService } from '../src/outbox/outbox-dispatcher.service';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { ExportDeadLetterPayload, ExportQueuePayload } from '../src/queue/queue.constants';
+import {
+	ExportDeadLetterPayload,
+	ExportQueueJob,
+	ExportQueuePayload,
+} from '../src/queue/queue.constants';
 import { QueueService } from '../src/queue/queue.service';
 import {
 	OBJECT_STORAGE,
@@ -24,6 +28,7 @@ import {
 	STORAGE_CONFIG,
 } from '../src/storage/storage.tokens';
 import { createAppValidationPipe } from '../src/validation.pipe';
+import { isolatedConfig } from './test-config';
 import {
 	createDeadLetterPayload,
 	WorkerRuntimeService,
@@ -42,6 +47,8 @@ const ids = {
 	workspace: `${runId}-workspace`,
 	foreignWorkspace: `${runId}-foreign-workspace`,
 	project: `${runId}-project`,
+	foreignProject: `${runId}-foreign-project`,
+	foreignDocument: `${runId}-foreign-document`,
 	document: `${runId}-document`,
 };
 const emails = {
@@ -188,34 +195,31 @@ describe('Task 6 background exports (e2e)', () => {
 
 	const auth = (token: string) => ({ Authorization: `Bearer ${token}` });
 	const until = async (check: () => Promise<boolean>) => {
-		const deadline = Date.now() + 5000;
+		const deadline = Date.now() + 15000;
 		while (!(await check())) {
 			if (Date.now() >= deadline) throw new Error('Timed out waiting for queue state');
 			await new Promise((resolve) => setTimeout(resolve, 20));
 		}
 	};
+
 	const withRealQueue = async (
 		name: string,
 		run: (context: {
 			queues: QueueService;
 			config: ConfigService;
 			runtime: WorkerRuntimeService;
-			inspect: Queue<ExportQueuePayload>;
-			dead: Queue;
+			inspect: Channel;
 		}) => Promise<void>,
 	) => {
-		const config = new ConfigService();
-		const queueName = `${runId}-${name}`;
-		const values: Record<string, string> = {
-			REDIS_URL: process.env.REDIS_URL!,
-			EXPORT_QUEUE_NAME: queueName,
-			EXPORT_DLQ_NAME: `${queueName}-dead`,
-		};
-		jest.spyOn(config, 'get').mockImplementation((key: string) => values[key]);
-		const connection = new Redis(values.REDIS_URL, { maxRetriesPerRequest: 1 });
-		const inspect = new Queue<ExportQueuePayload>(queueName, { connection });
-		const dead = new Queue(`${queueName}-dead`, { connection });
+		const config = isolatedConfig({
+			RABBITMQ_URL: process.env.RABBITMQ_URL,
+			EXPORT_QUEUE_NAME: runId + '-' + name,
+			EXPORT_DLQ_NAME: runId + '-' + name + '-dead',
+			EXPORT_RETRY_BACKOFF_MS: '10',
+			EXPORT_LEASE_DELAY_MS: '250',
+		});
 		const queues = new QueueService(config);
+		const inspect = await queues.createConsumerChannel();
 		const isolatedMaintenance = new ExportMaintenanceService(prisma, storage, config);
 		jest.spyOn(isolatedMaintenance, 'start').mockImplementation(() => {});
 		const runtime = new WorkerRuntimeService(
@@ -226,32 +230,25 @@ describe('Task 6 background exports (e2e)', () => {
 			queues,
 		);
 		try {
-			await run({ queues, config, runtime, inspect, dead });
+			await run({ queues, config, runtime, inspect });
 		} finally {
 			await runtime.close();
-			// Each queue name belongs exclusively to this run; remove exact IDs only.
-			for (const fixtureQueue of [inspect, dead]) {
-				const jobs = await fixtureQueue.getJobs([
-					'wait',
-					'active',
-					'delayed',
-					'completed',
-					'failed',
-				]);
-				expect(jobs.length).toBeLessThanOrEqual(2);
-				for (const job of jobs) await job.remove();
+			for (const name of [
+				queues.queueName,
+				queues.deadQueueName,
+				queues.leaseQueueName,
+				...queues.retryQueueNames,
+			]) {
+				await inspect.deleteQueue(name);
 			}
+			await inspect.close();
 			await queues.onModuleDestroy();
-			await Promise.all([inspect.close(), dead.close()]);
-			await connection.quit();
 		}
 	};
-	const queueJob = (exportJobId: string, attemptsMade = 0) =>
-		({
-			data: { exportJobId, schemaVersion: 1 },
-			attemptsMade,
-			opts: { attempts: 5 },
-		}) as Job<ExportQueuePayload>;
+	const queueJob = (exportJobId: string, attemptsMade = 0): ExportQueueJob => ({
+		data: { exportJobId, schemaVersion: 1 },
+		attemptsMade,
+	});
 
 	const login = async (email: string) => {
 		const response = await request(app.getHttpServer())
@@ -304,7 +301,6 @@ describe('Task 6 background exports (e2e)', () => {
 			.compile();
 		app = moduleFixture.createNestApplication();
 		app.useGlobalPipes(createAppValidationPipe());
-		// Prevent the real timer from dispatching unrelated DB rows during setup.
 		jest
 			.spyOn(moduleFixture.get(OutboxDispatcherService), 'onModuleInit')
 			.mockImplementation(() => {});
@@ -362,6 +358,21 @@ describe('Task 6 background exports (e2e)', () => {
 				id: ids.foreignWorkspace,
 				name: 'Task 6 foreign workspace',
 				members: { create: { userId: users[4].id, role: WorkspaceRole.OWNER } },
+				projects: {
+					create: {
+						id: ids.foreignProject,
+						name: 'Foreign project',
+						createdById: users[4].id,
+						documents: {
+							create: {
+								id: ids.foreignDocument,
+								title: 'Foreign document must stay private',
+								content: 'foreign-private-content',
+								authorId: users[4].id,
+							},
+						},
+					},
+				},
 			},
 		});
 		[ownerToken, memberToken, viewerToken, outsiderToken] = await Promise.all([
@@ -459,38 +470,105 @@ describe('Task 6 background exports (e2e)', () => {
 			.expect(202);
 		const exportId = response.body.id as string;
 		exportIds.add(exportId);
-		await request(app.getHttpServer()).get(`/exports/${exportId}`).set(auth(token())).expect(200);
-		await request(app.getHttpServer())
-			.get(`/exports/${exportId}`)
-			.set(auth(ownerToken))
-			.expect(200);
-		if (token() !== ownerToken) {
-			const otherRoleToken = token() === memberToken ? viewerToken : memberToken;
-			await request(app.getHttpServer())
-				.get(`/exports/${exportId}`)
-				.set(auth(otherRoleToken))
-				.expect(403);
-			await request(app.getHttpServer())
-				.delete(`/exports/${exportId}`)
-				.set(auth(otherRoleToken))
-				.expect(403);
-		}
 		await request(app.getHttpServer()).get(`/exports/${exportId}`).expect(401);
 		await request(app.getHttpServer()).delete(`/exports/${exportId}`).expect(401);
-		await request(app.getHttpServer())
-			.delete(`/exports/${exportId}`)
-			.set(auth(outsiderToken))
-			.expect(404);
-		await request(app.getHttpServer())
-			.delete(`/exports/${exportId}`)
-			.set(auth(token()))
-			.expect(202);
-		await request(app.getHttpServer())
-			.delete(`/exports/${exportId}`)
-			.set(auth(ownerToken))
-			.expect(202);
+		for (const actor of [ownerToken, memberToken, viewerToken, outsiderToken]) {
+			const allowed = actor === token() || actor === ownerToken;
+			const deniedStatus = actor === outsiderToken ? 404 : 403;
+			await request(app.getHttpServer())
+				.get(`/exports/${exportId}`)
+				.set(auth(actor))
+				.expect(allowed ? 200 : deniedStatus);
+			await request(app.getHttpServer())
+				.delete(`/exports/${exportId}`)
+				.set(auth(actor))
+				.expect(allowed ? 202 : deniedStatus);
+		}
 		await prisma.outboxEvent.updateMany({
 			where: { aggregateId: exportId },
+			data: { publishedAt: new Date() },
+		});
+	});
+
+	it('accepts an absent body and ignores attempts to override the server-owned export snapshot', async () => {
+		for (const body of [
+			undefined,
+			{
+				workspaceId: ids.foreignWorkspace,
+				requestedById: memberId,
+				filters: { schemaVersion: 2 },
+				status: 'COMPLETED',
+				objectKey: 'untrusted-key',
+			},
+		]) {
+			const pending = request(app.getHttpServer())
+				.post(`/workspaces/${ids.workspace}/exports`)
+				.set(auth(ownerToken));
+			const response = await (body === undefined ? pending : pending.send(body)).expect(202);
+			exportIds.add(response.body.id as string);
+			expect(
+				await prisma.exportJob.findUniqueOrThrow({ where: { id: response.body.id } }),
+			).toMatchObject({
+				workspaceId: ids.workspace,
+				requestedById: ownerId,
+				filters: { schemaVersion: 1 },
+				status: 'QUEUED',
+				objectKey: null,
+			});
+			await prisma.outboxEvent.updateMany({
+				where: { aggregateId: response.body.id },
+				data: { publishedAt: new Date() },
+			});
+		}
+	});
+
+	it('hides foreign workspaces and missing export IDs across create, get and cancel', async () => {
+		for (const workspaceId of [ids.foreignWorkspace, `${runId}-missing-workspace`]) {
+			await request(app.getHttpServer())
+				.post(`/workspaces/${workspaceId}/exports`)
+				.set(auth(ownerToken))
+				.send({})
+				.expect(404);
+		}
+		await request(app.getHttpServer())
+			.post(`/workspaces/${ids.workspace}/exports`)
+			.set(auth(outsiderToken))
+			.send({})
+			.expect(404);
+		await request(app.getHttpServer())
+			.get(`/exports/${runId}-missing`)
+			.set(auth(ownerToken))
+			.expect(404);
+		await request(app.getHttpServer())
+			.delete(`/exports/${runId}-missing`)
+			.set(auth(ownerToken))
+			.expect(404);
+	});
+
+	it('accepts and persists HTTP work while the outbox publisher is unavailable', async () => {
+		const publish = jest
+			.spyOn(queue, 'addExport')
+			.mockRejectedValue(new Error('broker unavailable'));
+		const response = await request(app.getHttpServer())
+			.post(`/workspaces/${ids.workspace}/exports`)
+			.set(auth(ownerToken))
+			.send({})
+			.expect(202);
+		const id = response.body.id as string;
+		exportIds.add(id);
+		expect(publish).not.toHaveBeenCalled();
+		await dispatcher.publishPending();
+		expect(publish).toHaveBeenCalledWith({ exportJobId: id, schemaVersion: 1 }, `export-${id}`);
+		expect(await prisma.exportJob.findUniqueOrThrow({ where: { id } })).toMatchObject({
+			status: 'QUEUED',
+		});
+		expect(
+			await prisma.outboxEvent.findUniqueOrThrow({
+				where: { type_aggregateId: { type: OutboxEventType.EXPORT_REQUESTED, aggregateId: id } },
+			}),
+		).toMatchObject({ publishedAt: null, claimedAt: null, claimToken: null, attempts: 1 });
+		await prisma.outboxEvent.updateMany({
+			where: { aggregateId: id },
 			data: { publishedAt: new Date() },
 		});
 	});
@@ -534,7 +612,7 @@ describe('Task 6 background exports (e2e)', () => {
 		expect(cancelled.cancelRequestedAt).not.toBeNull();
 	});
 
-	it('never acknowledges a delivery while the DB job is still PROCESSING', async () => {
+	it('does not resolve the processor while the DB job is still PROCESSING', async () => {
 		const job = await createDirectJob('active-redelivery');
 		await processor.claim(job);
 		await expect(processor.process(queueJob(job.id))).rejects.toThrow();
@@ -547,6 +625,18 @@ describe('Task 6 background exports (e2e)', () => {
 		const failed = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
 		expect(failed.status).toBe('FAILED');
 		expect(failed.errorCode).toBe('RETRIES_EXHAUSTED');
+	});
+
+	it('does not create a sixth processing attempt after stale recovery', async () => {
+		const job = await createDirectJob('exhausted-recovery', ownerId, { attempts: 5 });
+		const uploads = storage.uploadKeys.length;
+		await expect(processor.process(queueJob(job.id))).rejects.toThrow('RETRIES_EXHAUSTED');
+		expect(await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({
+			status: 'FAILED',
+			attempts: 5,
+			errorCode: 'RETRIES_EXHAUSTED',
+		});
+		expect(storage.uploadKeys).toHaveLength(uploads);
 	});
 
 	it('keeps the winning file when an old attempt loses its lease after upload', async () => {
@@ -624,6 +714,11 @@ describe('Task 6 background exports (e2e)', () => {
 		await prisma.workspaceMember.delete({
 			where: { userId_workspaceId: { userId: memberId, workspaceId: ids.workspace } },
 		});
+		await request(app.getHttpServer()).get(`/exports/${job.id}`).set(auth(memberToken)).expect(404);
+		await request(app.getHttpServer())
+			.delete(`/exports/${job.id}`)
+			.set(auth(memberToken))
+			.expect(404);
 		const uploadsBefore = storage.uploadKeys.length;
 		await expect(processor.process(queueJob(job.id))).rejects.toThrow('MEMBERSHIP_REVOKED');
 		const failed = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
@@ -636,6 +731,22 @@ describe('Task 6 background exports (e2e)', () => {
 			data: { userId: memberId, workspaceId: ids.workspace, role: WorkspaceRole.MEMBER },
 		});
 	});
+
+	it.each(['COMPLETED', 'FAILED', 'CANCELLED'] as const)(
+		'keeps terminal %s exports unchanged after repeated cancellation',
+		async (status) => {
+			const job = await createDirectJob(`cancel-terminal-${status}`, ownerId, { status });
+			const snapshot = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
+			for (let repeat = 0; repeat < 2; repeat++) {
+				const response = await request(app.getHttpServer())
+					.delete(`/exports/${job.id}`)
+					.set(auth(ownerToken))
+					.expect(202);
+				expect(response.body.status).toBe(status);
+			}
+			expect(await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).toEqual(snapshot);
+		},
+	);
 
 	it('streams the Task 5 CSV shape and stores the object before COMPLETED', async () => {
 		const job = await createDirectJob('successful-stream');
@@ -659,6 +770,8 @@ describe('Task 6 background exports (e2e)', () => {
 		expect(csv).toContain('\uFEFFid,projectId,title,status,authorName,updatedAt\r\n');
 		expect(csv).toContain('"Comma, quote "" and\nnewline"');
 		expect(csv).not.toContain('must-not-be-exported');
+		expect(csv).not.toContain(ids.foreignDocument);
+		expect(csv).not.toContain('Foreign document must stay private');
 		const status = await request(app.getHttpServer())
 			.get(`/exports/${job.id}`)
 			.set(auth(ownerToken))
@@ -687,15 +800,55 @@ describe('Task 6 background exports (e2e)', () => {
 			const pageQueries = findMany.mock.calls.map(([args]) => args);
 			expect(pageQueries).toHaveLength(2);
 			expect(pageQueries.every((query) => query?.take === 500)).toBe(true);
-			expect(pageQueries[0]?.select).not.toHaveProperty('content');
+			for (const query of pageQueries) {
+				expect(query?.where?.project).toEqual({ workspaceId: ids.workspace });
+				expect(query?.orderBy).toEqual({ id: 'asc' });
+				expect(query?.select).not.toHaveProperty('content');
+			}
 			expect(pageQueries[1]?.where).toHaveProperty('id.gt');
 			const completed = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
 			const csv = storage.objects.get(completed.objectKey!)?.toString('utf8');
 			expect(csv).not.toContain('private content');
+			expect(csv).not.toContain(ids.foreignDocument);
 			expect(csv).toContain('Paged document 500');
 		} finally {
 			findMany.mockRestore();
 			await prisma.document.deleteMany({ where: { id: { in: documentIds } } });
+		}
+	});
+
+	it('exports all document statuses from every project of the workspace', async () => {
+		const projectId = `${runId}-second-project`;
+		await prisma.project.create({
+			data: {
+				id: projectId,
+				workspaceId: ids.workspace,
+				name: 'Second project',
+				createdById: ownerId,
+			},
+		});
+		try {
+			const statuses = Object.values(DocumentStatus);
+			await prisma.document.createMany({
+				data: statuses.map((status) => ({
+					id: `${runId}-status-${status}`,
+					projectId,
+					authorId: ownerId,
+					title: `Document ${status}`,
+					status,
+					content: 'private status content',
+				})),
+			});
+			const job = await createDirectJob('all-projects-and-statuses');
+			await processor.process(queueJob(job.id));
+			const completed = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
+			const csv = storage.objects.get(completed.objectKey!)!.toString('utf8');
+			expect(csv).toContain(ids.document);
+			for (const status of statuses) expect(csv).toContain(`${runId}-status-${status}`);
+			expect(csv).not.toContain('private status content');
+			expect(csv).not.toContain(ids.foreignDocument);
+		} finally {
+			await prisma.project.deleteMany({ where: { id: projectId, workspaceId: ids.workspace } });
 		}
 	});
 
@@ -760,6 +913,34 @@ describe('Task 6 background exports (e2e)', () => {
 		expect(new Set(calls.map((call) => call.queueJobId))).toEqual(new Set([job.queueJobId]));
 	});
 
+	it('reclaims an expired outbox lease after dispatcher restart with the same messageId', async () => {
+		const job = await createDirectJob('dispatcher-restart');
+		await prisma.outboxEvent.create({
+			data: {
+				type: OutboxEventType.EXPORT_REQUESTED,
+				aggregateId: job.id,
+				payload: { exportJobId: job.id, schemaVersion: 1 },
+				claimedAt: new Date(Date.now() - 60_000),
+				claimToken: 'stopped-dispatcher',
+			},
+		});
+		const restarted = new OutboxDispatcherService(
+			prisma,
+			queue as unknown as QueueService,
+			new ConfigService(),
+		);
+		expect(await restarted.publishPending()).toBe(1);
+		expect(queue.exportCalls.filter((call) => call.payload.exportJobId === job.id)).toEqual([
+			{ payload: { exportJobId: job.id, schemaVersion: 1 }, queueJobId: job.queueJobId },
+		]);
+		const event = await prisma.outboxEvent.findFirstOrThrow({ where: { aggregateId: job.id } });
+		expect(event).toMatchObject({
+			claimToken: null,
+			claimedAt: null,
+			publishedAt: expect.any(Date),
+		});
+	});
+
 	it('returns QUEUED before a transient retry and marks attempt five FAILED', async () => {
 		const retry = await createDirectJob('transient-retry');
 		storage.failNextUpload = true;
@@ -783,33 +964,33 @@ describe('Task 6 background exports (e2e)', () => {
 		});
 	});
 
-	it('retries a transient membership lookup failure before claim', async () => {
+	it('leaves membership DB failures for redelivery without spending a processing attempt', async () => {
 		const retry = await createDirectJob('pre-claim-db-retry');
 		const membershipLookup = jest
 			.spyOn(prisma.workspaceMember, 'findUnique')
 			.mockRejectedValueOnce(Object.assign(new Error('database unavailable'), { code: 'P1001' }));
-		await expect(processor.process(queueJob(retry.id))).rejects.toThrow('database unavailable');
+		await expect(processor.process(queueJob(retry.id))).rejects.toBeInstanceOf(ExportDatabaseError);
 		membershipLookup.mockRestore();
 		const queued = await prisma.exportJob.findUniqueOrThrow({ where: { id: retry.id } });
 		expect(queued).toMatchObject({
 			status: ExportJobStatus.QUEUED,
-			attempts: 1,
-			errorCode: 'DATABASE_UNAVAILABLE',
+			attempts: 0,
+			errorCode: null,
 		});
 
 		const exhausted = await createDirectJob('pre-claim-db-exhausted', ownerId, { attempts: 4 });
 		const finalLookup = jest
 			.spyOn(prisma.workspaceMember, 'findUnique')
 			.mockRejectedValueOnce(Object.assign(new Error('database unavailable'), { code: 'P1001' }));
-		await expect(processor.process(queueJob(exhausted.id, 4))).rejects.toThrow(
-			'database unavailable',
+		await expect(processor.process(queueJob(exhausted.id, 4))).rejects.toBeInstanceOf(
+			ExportDatabaseError,
 		);
 		finalLookup.mockRestore();
 		const failed = await prisma.exportJob.findUniqueOrThrow({ where: { id: exhausted.id } });
 		expect(failed).toMatchObject({
-			status: ExportJobStatus.FAILED,
-			attempts: 5,
-			errorCode: 'RETRIES_EXHAUSTED',
+			status: ExportJobStatus.QUEUED,
+			attempts: 4,
+			errorCode: null,
 		});
 	});
 
@@ -992,6 +1173,40 @@ describe('Task 6 background exports (e2e)', () => {
 		expect(expired.downloadUrl).toBeNull();
 	});
 
+	it('retains the exact expired key when deletion fails and retries it idempotently', async () => {
+		const key = `workspaces/${ids.workspace}/exports/${runId}-retention-retry/attempt.csv`;
+		const job = await createDirectJob('retention-retry', ownerId, {
+			status: ExportJobStatus.COMPLETED,
+			objectKey: key,
+			expiresAt: new Date(Date.now() - 1000),
+		});
+		storage.objects.set(key, Buffer.from('expired CSV'));
+		const originalRemove = storage.remove.bind(storage);
+		let failOnce = true;
+		jest.spyOn(storage, 'remove').mockImplementation((objectKey) => {
+			if (objectKey === key && failOnce) {
+				failOnce = false;
+				return Promise.reject(new Error('temporary cleanup failure'));
+			}
+			return originalRemove(objectKey);
+		});
+		await expect(maintenance.removeExpired()).rejects.toThrow('temporary cleanup failure');
+		expect(await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({
+			status: 'COMPLETED',
+			objectKey: key,
+			expiredAt: null,
+		});
+		expect(storage.objects.has(key)).toBe(true);
+		await maintenance.removeExpired();
+		expect(await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({
+			status: 'COMPLETED',
+			objectKey: null,
+			expiredAt: expect.any(Date),
+		});
+		expect(storage.objects.has(key)).toBe(false);
+		expect(await maintenance.removeExpired()).toBe(0);
+	});
+
 	it('persists heartbeat while upload is pending, at most once per throttle interval', async () => {
 		const job = await createDirectJob('real-heartbeat');
 		const config = new ConfigService();
@@ -1037,8 +1252,8 @@ describe('Task 6 background exports (e2e)', () => {
 		expect(payload).not.toHaveProperty('objectKey');
 	});
 
-	it('keeps queued jobs across producer restart, deduplicates IDs, and drains active work on close', async () => {
-		await withRealQueue('restart', async ({ config, runtime, inspect }) => {
+	it('RabbitMQ persists across producer restart, fences duplicates, and drains active work on close', async () => {
+		await withRealQueue('restart', async ({ config, queues, runtime, inspect }) => {
 			const job = await createDirectJob('queue-restart');
 			const producer = new QueueService(config);
 			try {
@@ -1047,12 +1262,8 @@ describe('Task 6 background exports (e2e)', () => {
 			} finally {
 				await producer.onModuleDestroy();
 			}
-			expect(await inspect.getWaitingCount()).toBe(1);
-			const persisted = await inspect.getJob(job.queueJobId);
-			expect(persisted?.opts).toMatchObject({
-				attempts: 5,
-				backoff: { type: 'exponential', delay: 5000 },
-			});
+			expect((await inspect.checkQueue(queues.queueName)).messageCount).toBe(2);
+			const upload = jest.spyOn(storage, 'uploadStream');
 			const release = storage.holdNextUpload();
 			runtime.start();
 			await storage.uploadAtGate.promise;
@@ -1063,108 +1274,166 @@ describe('Task 6 background exports (e2e)', () => {
 			try {
 				await new Promise((resolve) => setTimeout(resolve, 40));
 				expect(closed).toBe(false);
-				expect(await persisted!.getState()).toBe('active');
 			} finally {
 				release();
 				await closing;
 			}
-			expect(await persisted!.getState()).toBe('completed');
+			expect(upload).toHaveBeenCalledTimes(1);
 			expect((await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe(
 				'COMPLETED',
 			);
 		});
-	});
+	}, 20000);
 
-	it('real BullMQ retries five times then publishes one sanitized DLQ job', async () => {
-		await withRealQueue('retry-dlq', async ({ runtime, inspect, dead }) => {
+	it('RabbitMQ retries five times then confirms sanitized DLQ metadata before ACK', async () => {
+		await withRealQueue('retry-dlq', async ({ queues, runtime, inspect }) => {
 			const job = await createDirectJob('real-retry-dlq');
 			const upload = jest
 				.spyOn(storage, 'uploadStream')
 				.mockRejectedValue(new Error('private S3 message'));
-			await inspect.add(
-				'build-export',
-				{ exportJobId: job.id, schemaVersion: 1 },
-				{ jobId: job.queueJobId, attempts: 5, backoff: { type: 'fixed', delay: 10 } },
-			);
+			await queues.addExport({ exportJobId: job.id, schemaVersion: 1 }, job.queueJobId);
 			runtime.start();
-			await until(async () => !!(await dead.getJob(`dead-${job.queueJobId}`)));
+			await until(async () => (await inspect.checkQueue(queues.deadQueueName)).messageCount === 1);
 			await runtime.close();
 			expect(upload).toHaveBeenCalledTimes(5);
-			expect(await inspect.getJob(job.queueJobId).then((value) => value!.getState())).toBe(
-				'failed',
-			);
 			expect((await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe(
 				'FAILED',
 			);
-			expect((await dead.getJob(`dead-${job.queueJobId}`))!.data).toEqual({
+			const dead = await inspect.get(queues.deadQueueName, { noAck: true });
+			expect(dead && JSON.parse(dead.content.toString())).toEqual({
 				exportJobId: job.id,
 				sourceQueueJobId: job.queueJobId,
 				attempts: 5,
 				errorCode: 'RETRIES_EXHAUSTED',
 			});
+			expect((await inspect.checkQueue(queues.queueName)).messageCount).toBe(0);
 		});
-	});
+	}, 20000);
 
-	it('delays a live DB lease without ACK or consuming a BullMQ attempt', async () => {
+	it('defers a live DB lease without consuming a processing attempt', async () => {
 		await withRealQueue('lease-delay', async ({ queues, runtime, inspect }) => {
 			const job = await createDirectJob('real-lease-delay');
 			await processor.claim(job);
-			const queued = await queues.addExport(
-				{ exportJobId: job.id, schemaVersion: 1 },
-				job.queueJobId,
-			);
+			await queues.addExport({ exportJobId: job.id, schemaVersion: 1 }, job.queueJobId);
+			const defer = jest.spyOn(queues, 'deferExport');
 			runtime.start();
-			await until(async () => (await queued.getState()) === 'delayed');
+			await until(async () => defer.mock.calls.length > 0);
 			await runtime.close();
-			expect((await inspect.getJob(job.queueJobId))!.attemptsMade).toBe(0);
+			expect(defer.mock.calls[0][2]).toBe(0);
 			expect((await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe(
 				'PROCESSING',
 			);
+			expect((await inspect.checkQueue(queues.deadQueueName)).messageCount).toBe(0);
 		});
-	});
+	}, 20000);
 
-	it('reconciles an exhausted queue job when the final DB read failed before claim', async () => {
-		await withRealQueue('read-failure', async ({ runtime, inspect, dead }) => {
+	it('returns a lease message to the main queue after its real TTL with the same budget', async () => {
+		await withRealQueue('lease-ttl', async ({ queues, inspect }) => {
+			const id = `${runId}-lease-ttl`;
+			const data = { exportJobId: id, schemaVersion: 1 as const };
+			await queues.deferExport(data, `export-${id}`, 3);
+			await until(async () => (await inspect.checkQueue(queues.queueName)).messageCount === 1);
+			const returned = await inspect.get(queues.queueName, { noAck: false });
+			if (!returned) throw new Error('Lease delivery was not returned to the main queue');
+			expect(JSON.parse(returned.content.toString())).toEqual(data);
+			expect(returned.properties.messageId).toBe(`export-${id}`);
+			expect(returned.properties.headers?.['x-export-attempts']).toBe(3);
+			expect(returned.properties.deliveryMode).toBe(2);
+			inspect.ack(returned);
+			expect((await inspect.checkQueue(queues.leaseQueueName)).messageCount).toBe(0);
+		});
+	}, 20000);
+
+	it('quarantines a real malformed delivery without leaking its body into the DLQ', async () => {
+		await withRealQueue('malformed', async ({ queues, runtime, inspect }) => {
+			const processSpy = jest.spyOn(processor, 'process');
+			inspect.sendToQueue(queues.queueName, Buffer.from('private invalid payload'), {
+				persistent: true,
+			});
+			runtime.start();
+			await until(async () => (await inspect.checkQueue(queues.deadQueueName)).messageCount === 1);
+			await runtime.close();
+			expect(processSpy).not.toHaveBeenCalled();
+			const dead = await inspect.get(queues.deadQueueName, { noAck: true });
+			expect(dead && JSON.parse(dead.content.toString())).toEqual({
+				exportJobId: 'invalid-message',
+				sourceQueueJobId: 'invalid-message',
+				attempts: 0,
+				errorCode: 'INVALID_FILTERS',
+			});
+		});
+	}, 20000);
+
+	it('redelivers an initial DB read failure without prematurely finalizing the job', async () => {
+		await withRealQueue('read-failure', async ({ queues, runtime, inspect }) => {
 			const job = await createDirectJob('real-read-failure');
 			jest
 				.spyOn(prisma.exportJob, 'findUnique')
 				.mockRejectedValueOnce(new Error('temporary DB read failure'));
-			await inspect.add(
-				'build-export',
-				{ exportJobId: job.id, schemaVersion: 1 },
-				{ jobId: job.queueJobId, attempts: 1 },
-			);
+			await queues.addRetry({ exportJobId: job.id, schemaVersion: 1 }, job.queueJobId, 4);
 			runtime.start();
-			await until(async () => !!(await dead.getJob(`dead-${job.queueJobId}`)));
-			expect((await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe(
-				'FAILED',
+			await until(
+				async () =>
+					(await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).status ===
+					'COMPLETED',
 			);
+			expect((await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe(
+				'COMPLETED',
+			);
+			expect((await inspect.checkQueue(queues.deadQueueName)).messageCount).toBe(0);
 		});
-	}, 10000);
+	}, 20000);
 
-	it('repairs a missed DLQ publication from the retained failed queue job idempotently', async () => {
-		await withRealQueue('dlq-repair', async ({ queues, runtime, inspect, dead }) => {
+	it('quarantines a missing domain row instead of retrying or creating a fake ExportJob', async () => {
+		await withRealQueue('missing-row', async ({ queues, runtime, inspect }) => {
+			const id = `${runId}-missing-row`;
+			await queues.addExport({ exportJobId: id, schemaVersion: 1 }, `export-${id}`);
+			runtime.start();
+			await until(async () => (await inspect.checkQueue(queues.deadQueueName)).messageCount === 1);
+			await runtime.close();
+			expect(await prisma.exportJob.findUnique({ where: { id } })).toBeNull();
+			const dead = await inspect.get(queues.deadQueueName, { noAck: true });
+			expect(dead && JSON.parse(dead.content.toString())).toEqual({
+				exportJobId: id,
+				sourceQueueJobId: `export-${id}`,
+				attempts: 0,
+				errorCode: 'INVALID_FILTERS',
+			});
+		});
+	}, 20000);
+
+	it('redelivers an unacknowledged delivery after a consumer disconnect', async () => {
+		await withRealQueue('redeliver', async ({ queues, runtime, inspect }) => {
+			const job = await createDirectJob('redeliver');
+			await queues.addExport({ exportJobId: job.id, schemaVersion: 1 }, job.queueJobId);
+			const crashed = await queues.createConsumerChannel();
+			expect(await crashed.get(queues.queueName, { noAck: false })).toBeTruthy();
+			await crashed.close();
+			runtime.start();
+			await until(
+				async () =>
+					(await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } })).status ===
+					'COMPLETED',
+			);
+			await runtime.close();
+			expect((await inspect.checkQueue(queues.queueName)).messageCount).toBe(0);
+		});
+	}, 20000);
+
+	it('requeues the original delivery when DLQ publication fails and repairs it after reconnect', async () => {
+		await withRealQueue('dlq-repair', async ({ queues, runtime, inspect }) => {
 			const job = await createDirectJob('real-dlq-repair');
 			jest.spyOn(storage, 'uploadStream').mockRejectedValue(new Error('private storage detail'));
 			const publish = jest
 				.spyOn(queues, 'addDeadLetter')
-				.mockRejectedValueOnce(new Error('temporary Redis failure'));
-			const queued = await inspect.add(
-				'build-export',
-				{ exportJobId: job.id, schemaVersion: 1 },
-				{ jobId: job.queueJobId, attempts: 1 },
-			);
+				.mockRejectedValueOnce(new Error('temporary broker failure'));
+			await queues.addRetry({ exportJobId: job.id, schemaVersion: 1 }, job.queueJobId, 4);
 			runtime.start();
-			await until(
-				async () => (await queued.getState()) === 'failed' && publish.mock.calls.length > 0,
-			);
+			await until(async () => (await inspect.checkQueue(queues.deadQueueName)).messageCount === 1);
 			await runtime.close();
-			await runtime.reconcileFailed();
-			await runtime.reconcileFailed();
-			expect(await dead.getWaitingCount()).toBe(1);
-			expect((await dead.getJob(`dead-${job.queueJobId}`))!.data.errorCode).toBe(
-				'RETRIES_EXHAUSTED',
-			);
+			expect(publish).toHaveBeenCalledTimes(2);
+			const dead = await inspect.get(queues.deadQueueName, { noAck: true });
+			expect(dead && JSON.parse(dead.content.toString()).errorCode).toBe('RETRIES_EXHAUSTED');
 		});
-	});
+	}, 20000);
 });

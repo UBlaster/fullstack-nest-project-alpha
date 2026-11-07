@@ -528,8 +528,10 @@ describeWithRedis('Task 4 Redis cache-aside (e2e)', () => {
 		if (shutdownRedis.status === 'wait') await shutdownRedis.connect();
 		const quit = jest.spyOn(shutdownRedis, 'quit').mockRejectedValueOnce(new Error('quit failed'));
 		const disconnect = jest.spyOn(shutdownRedis, 'disconnect');
+		const ended = new Promise<void>((resolve) => shutdownRedis.once('end', resolve));
 
 		await shutdownApp.close();
+		await ended;
 
 		expect(quit).toHaveBeenCalledTimes(1);
 		expect(disconnect).toHaveBeenCalledTimes(1);
