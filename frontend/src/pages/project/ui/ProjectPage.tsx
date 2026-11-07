@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { api, downloadPresignedUrl } from '../../../shared/api';
+import { api, downloadAuthenticated } from '../../../shared/api';
 import { Layout } from '../../../widgets/layout';
 
 export function ProjectPage() {
@@ -15,19 +15,6 @@ export function ProjectPage() {
 	const [error, setError] = useState<string | null>(null);
 	const [exportError, setExportError] = useState('');
 	const [isExporting, setIsExporting] = useState(false);
-	const [exportJob, setExportJob] = useState<{
-		id: string;
-		projectId: string | undefined;
-		status: 'QUEUED' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
-		progress: number;
-		errorCode: string | null;
-		downloadUrl: string | null;
-	} | null>(null);
-	const activeExportJob = exportJob?.projectId === id ? exportJob : null;
-	const exportJobId = activeExportJob?.id;
-	const exportJobStatus = activeExportJob?.status;
-	const isExportReady = exportJobStatus === 'COMPLETED' && !!activeExportJob?.downloadUrl;
-	const isExportPreparing = exportJobStatus === 'QUEUED' || exportJobStatus === 'PROCESSING';
 	const load = useCallback(
 		() =>
 			api('/projects/' + id)
@@ -77,38 +64,6 @@ export function ProjectPage() {
 		};
 	}, [project, searchQuery]);
 
-	useEffect(() => {
-		if (!exportJobId || !exportJobStatus || !['QUEUED', 'PROCESSING'].includes(exportJobStatus)) {
-			return;
-		}
-		const controller = new AbortController();
-		let timer: number | undefined;
-		let stopped = false;
-		const poll = async () => {
-			try {
-				const current = await api(`/exports/${exportJobId}`, { signal: controller.signal });
-				if (stopped) return;
-				setExportJob((previous) =>
-					previous?.id === exportJobId && ['QUEUED', 'PROCESSING'].includes(previous.status)
-						? { ...current, projectId: previous.projectId }
-						: previous,
-				);
-			} catch (error) {
-				if (!controller.signal.aborted) {
-					setExportError(error instanceof Error ? error.message : 'Ошибка статуса экспорта');
-				}
-			} finally {
-				if (!stopped) timer = window.setTimeout(poll, 1_000);
-			}
-		};
-		timer = window.setTimeout(poll, 1_000);
-		return () => {
-			stopped = true;
-			if (timer !== undefined) window.clearTimeout(timer);
-			controller.abort();
-		};
-	}, [exportJobId, exportJobStatus]);
-
 	if (error) {
 		return (
 			<Layout>
@@ -117,7 +72,7 @@ export function ProjectPage() {
 		);
 	}
 
-	if (!project || project.id !== id) {
+	if (!project) {
 		return (
 			<Layout>
 				<p>Загрузка...</p>
@@ -134,26 +89,15 @@ export function ProjectPage() {
 				<h2>Документы ({documents.length})</h2>
 				<button
 					type="button"
-					disabled={isExporting || isExportPreparing}
+					disabled={isExporting}
 					onClick={async () => {
 						setIsExporting(true);
 						setExportError('');
 						try {
-							if (activeExportJob?.status === 'COMPLETED' && activeExportJob.downloadUrl) {
-								const current = await api(`/exports/${activeExportJob.id}`);
-								setExportJob((previous) =>
-									previous?.id === activeExportJob.id ? { ...current, projectId: id } : previous,
-								);
-								if (!current.downloadUrl)
-									throw new Error('Срок хранения экспорта истёк. Подготовьте новый CSV.');
-								downloadPresignedUrl(current.downloadUrl);
-							} else {
-								const created = await api(`/workspaces/${project.workspaceId}/exports`, {
-									method: 'POST',
-									body: JSON.stringify({}),
-								});
-								setExportJob({ ...created, projectId: id, errorCode: null, downloadUrl: null });
-							}
+							await downloadAuthenticated(
+								`/workspaces/${project.workspaceId}/documents/export.csv`,
+								'documents.csv',
+							);
 						} catch (error) {
 							setExportError(error instanceof Error ? error.message : 'Ошибка экспорта');
 						} finally {
@@ -161,50 +105,10 @@ export function ProjectPage() {
 						}
 					}}
 				>
-					{isExporting
-						? isExportReady
-							? 'Скачивание...'
-							: 'Запуск...'
-						: isExportReady
-							? 'Скачать готовый CSV'
-							: isExportPreparing
-								? 'Подготовка CSV...'
-								: 'Подготовить CSV workspace'}
+					{isExporting ? 'Экспорт...' : 'Скачать CSV workspace'}
 				</button>
 			</div>
 			{exportError && <p className="error">{exportError}</p>}
-			{activeExportJob && (
-				<div className="export-status" aria-live="polite">
-					<span>
-						Экспорт: {activeExportJob.status} · {activeExportJob.progress}%
-					</span>
-					{activeExportJob.errorCode && (
-						<span className="error">Код: {activeExportJob.errorCode}</span>
-					)}
-					{['QUEUED', 'PROCESSING'].includes(activeExportJob.status) && (
-						<button
-							type="button"
-							onClick={async () => {
-								try {
-									setExportError('');
-									const cancelled = await api(`/exports/${activeExportJob.id}`, {
-										method: 'DELETE',
-									});
-									setExportJob((previous) =>
-										previous?.id === activeExportJob.id
-											? { ...cancelled, projectId: id }
-											: previous,
-									);
-								} catch (error) {
-									setExportError(error instanceof Error ? error.message : 'Ошибка отмены экспорта');
-								}
-							}}
-						>
-							Отменить
-						</button>
-					)}
-				</div>
-			)}
 			<input
 				type="search"
 				placeholder="Поиск документов по заголовку"

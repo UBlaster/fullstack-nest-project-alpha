@@ -1,18 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import {
-	AbortMultipartUploadCommand,
-	CompleteMultipartUploadCommand,
-	CreateMultipartUploadCommand,
 	DeleteObjectCommand,
 	GetObjectCommand,
 	HeadObjectCommand,
 	ListObjectsV2Command,
 	PutObjectCommand,
 	S3Client,
-	UploadPartCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { Upload } from '@aws-sdk/lib-storage';
 import { Inject, Injectable, OnModuleDestroy } from '@nestjs/common';
 import { getRequestId } from '../diagnostics/request-context';
 import { observeS3 } from '../diagnostics/s3-operation';
@@ -90,105 +85,6 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 				),
 			{ presign: true },
 		);
-	}
-
-	async uploadStream(input: {
-		objectKey: string;
-		body: import('node:stream').Readable;
-		contentType: string;
-		signal: AbortSignal;
-	}): Promise<void> {
-		const requestId = getRequestId() ?? randomUUID();
-		const abortError = () =>
-			Object.assign(new Error('Export upload aborted'), { name: 'AbortError' });
-		if (input.signal.aborted) throw abortError();
-		let uploadId: string | undefined;
-		let multipartAborted = false;
-		const client = new Proxy(this.s3, {
-			get: (target, property) => {
-				if (property !== 'send') return Reflect.get(target, property, target);
-				return async (
-					command:
-						| PutObjectCommand
-						| CreateMultipartUploadCommand
-						| UploadPartCommand
-						| CompleteMultipartUploadCommand
-						| AbortMultipartUploadCommand,
-				) => {
-					if (command instanceof AbortMultipartUploadCommand) {
-						const result = await observeS3('AbortMultipartUpload', () => target.send(command), {
-							requestId,
-						});
-						multipartAborted = true;
-						return result;
-					}
-					if (input.signal.aborted) throw abortError();
-					const options = { abortSignal: input.signal };
-					if (command instanceof CreateMultipartUploadCommand) {
-						const result = await observeS3(
-							'CreateMultipartUpload',
-							() => target.send(command, options),
-							{ requestId },
-						);
-						uploadId = result.UploadId;
-						return result;
-					}
-					if (command instanceof UploadPartCommand)
-						return observeS3('UploadPart', () => target.send(command, options), { requestId });
-					if (command instanceof PutObjectCommand)
-						return observeS3('PutObject', () => target.send(command, options), { requestId });
-					return observeS3('CompleteMultipartUpload', () => target.send(command, options), {
-						requestId,
-					});
-				};
-			},
-		});
-		const upload = new Upload({
-			client,
-			params: {
-				Bucket: this.config.bucket,
-				Key: input.objectKey,
-				Body: input.body,
-				ContentType: input.contentType,
-			},
-			queueSize: 2,
-			partSize: 5 * 1024 * 1024,
-			leavePartsOnError: false,
-		});
-		const abort = () => {
-			input.body.destroy(abortError());
-		};
-		input.signal.addEventListener('abort', abort, { once: true });
-		try {
-			await upload.done();
-			if (input.signal.aborted) throw abortError();
-		} catch (error) {
-			if (uploadId && !multipartAborted) {
-				try {
-					await observeS3(
-						'AbortMultipartUpload',
-						() =>
-							this.s3.send(
-								new AbortMultipartUploadCommand({
-									Bucket: this.config.bucket,
-									Key: input.objectKey,
-									UploadId: uploadId,
-								}),
-							),
-						{ requestId },
-					);
-				} catch (cleanupError) {
-					if (
-						!isNotFound(cleanupError) &&
-						!(cleanupError instanceof Error && cleanupError.name === 'NoSuchUpload')
-					)
-						throw cleanupError;
-				}
-			}
-			throw error;
-		} finally {
-			input.signal.removeEventListener('abort', abort);
-		}
 	}
 
 	async head(objectKey: string): Promise<ObjectHead> {

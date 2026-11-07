@@ -6,10 +6,3 @@ services:
     command: ['sh', '-c', 'npx prisma generate && npx nest start --debug 0.0.0.0:9229 --watch']
     volumes:
       - ./backend/dist:/app/dist
-  worker:
-    ports:
-      - '127.0.0.1:9230:9230'
-    command:
-      - sh
-      - -c
-      - npx prisma generate && exec node --inspect=0.0.0.0:9230 -r ts-node/register src/worker/worker.ts

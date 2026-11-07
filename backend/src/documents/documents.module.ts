@@ -11,6 +11,5 @@ import { DocumentsService } from './documents.service';
 	imports: [AccessModule, CacheModule],
 	controllers: [DocumentsController, ProjectDocumentsController, WorkspaceDocumentsController],
 	providers: [DocumentsService, DocumentsExportService],
-	exports: [DocumentsExportService],
 })
 export class DocumentsModule {}

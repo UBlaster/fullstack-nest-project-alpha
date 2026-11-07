@@ -16,14 +16,7 @@ services:
       }
   redis:
     image: redis:7-bookworm
-    command:
-      [
-        "redis-server",
-        "--appendonly",
-        "yes",
-        "--maxmemory-policy",
-        "noeviction",
-      ]
+    command: ["redis-server", "--appendonly", "yes"]
     volumes: [redis-data:/data]
     healthcheck:
       {
@@ -32,21 +25,6 @@ services:
         timeout: 3s,
         retries: 10,
       }
-  rabbitmq:
-    image: rabbitmq:4.2-management
-    hostname: rabbitmq
-    environment:
-      RABBITMQ_DEFAULT_USER: "${RABBITMQ_USER:-app}"
-      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASSWORD:-app}"
-    ports:
-      - "127.0.0.1:${RABBITMQ_HOST_PORT:-5672}:5672"
-      - "127.0.0.1:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
-    volumes: [rabbitmq-data:/var/lib/rabbitmq]
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
   db-init:
     build:
       context: ./backend
@@ -82,17 +60,6 @@ services:
       S3_DOWNLOAD_TTL_SECONDS: "${S3_DOWNLOAD_TTL_SECONDS:-300}"
       DOCUMENT_FILE_MAX_BYTES: "${DOCUMENT_FILE_MAX_BYTES:-26214400}"
       DOCUMENT_FILE_PENDING_TTL_HOURS: "${DOCUMENT_FILE_PENDING_TTL_HOURS:-24}"
-      EXPORT_QUEUE_NAME: "${EXPORT_QUEUE_NAME:-workspace-exports}"
-      RABBITMQ_URL: "${RABBITMQ_URL:-amqp://app:app@rabbitmq:5672}"
-      RABBITMQ_TIMEOUT_MS: "${RABBITMQ_TIMEOUT_MS:-5000}"
-      EXPORT_RETRY_BACKOFF_MS: "${EXPORT_RETRY_BACKOFF_MS:-5000}"
-      EXPORT_LEASE_DELAY_MS: "${EXPORT_LEASE_DELAY_MS:-2000}"
-      EXPORT_DLQ_NAME: "${EXPORT_DLQ_NAME:-workspace-exports-dead}"
-      EXPORT_OUTBOX_POLL_MS: "${EXPORT_OUTBOX_POLL_MS:-1000}"
-      EXPORT_OUTBOX_LEASE_MS: "${EXPORT_OUTBOX_LEASE_MS:-30000}"
-      EXPORT_HEARTBEAT_THROTTLE_MS: "${EXPORT_HEARTBEAT_THROTTLE_MS:-2000}"
-      EXPORT_STALE_AFTER_MS: "${EXPORT_STALE_AFTER_MS:-300000}"
-      EXPORT_RETENTION_MS: "${EXPORT_RETENTION_MS:-86400000}"
       TSC_WATCHFILE: "DynamicPriorityPolling"
       TSC_WATCHDIRECTORY: "DynamicPriorityPolling"
     ports: ["3000:3000"]
@@ -116,52 +83,6 @@ services:
       - ./backend/nest-cli.json:/app/nest-cli.json
     command: ["sh", "-c", "npx prisma generate && npm run start:dev"]
     depends_on: { db-init: { condition: service_completed_successfully } }
-  worker:
-    stop_grace_period: 35s
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.dev
-    environment:
-      DATABASE_URL: "postgresql://app:app@postgres:5432/workspace_docs?schema=public"
-      S3_ENDPOINT: "${S3_ENDPOINT:-https://storage.yandexcloud.net}"
-      S3_REGION: "${S3_REGION:-ru-central1}"
-      S3_BUCKET: "${S3_BUCKET:-tt5}"
-      S3_ACCESS_KEY_ID: "${S3_ACCESS_KEY_ID}"
-      S3_SECRET_ACCESS_KEY: "${S3_SECRET_ACCESS_KEY}"
-      S3_FORCE_PATH_STYLE: "${S3_FORCE_PATH_STYLE:-false}"
-      S3_UPLOAD_TTL_SECONDS: "${S3_UPLOAD_TTL_SECONDS:-600}"
-      S3_DOWNLOAD_TTL_SECONDS: "${S3_DOWNLOAD_TTL_SECONDS:-300}"
-      EXPORT_QUEUE_NAME: "${EXPORT_QUEUE_NAME:-workspace-exports}"
-      RABBITMQ_URL: "${RABBITMQ_URL:-amqp://app:app@rabbitmq:5672}"
-      RABBITMQ_TIMEOUT_MS: "${RABBITMQ_TIMEOUT_MS:-5000}"
-      EXPORT_RETRY_BACKOFF_MS: "${EXPORT_RETRY_BACKOFF_MS:-5000}"
-      EXPORT_LEASE_DELAY_MS: "${EXPORT_LEASE_DELAY_MS:-2000}"
-      EXPORT_DLQ_NAME: "${EXPORT_DLQ_NAME:-workspace-exports-dead}"
-      EXPORT_HEARTBEAT_THROTTLE_MS: "${EXPORT_HEARTBEAT_THROTTLE_MS:-2000}"
-      EXPORT_STALE_AFTER_MS: "${EXPORT_STALE_AFTER_MS:-300000}"
-      EXPORT_RETENTION_MS: "${EXPORT_RETENTION_MS:-86400000}"
-      TSC_WATCHFILE: "DynamicPriorityPolling"
-      TSC_WATCHDIRECTORY: "DynamicPriorityPolling"
-    volumes:
-      - ./backend/src:/app/src
-      - ./backend/prisma:/app/prisma
-      - ./backend/tsconfig.json:/app/tsconfig.json
-      - ./backend/tsconfig.build.json:/app/tsconfig.build.json
-      - ./backend/nest-cli.json:/app/nest-cli.json
-    command:
-      [
-        "sh",
-        "-c",
-        "npx prisma generate && exec ./node_modules/.bin/ts-node src/worker/worker.ts",
-      ]
-    healthcheck:
-      test: ["CMD", "node", "-e", "process.kill(1, 0)"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    depends_on:
-      db-init: { condition: service_completed_successfully }
-      rabbitmq: { condition: service_healthy }
   frontend:
     build:
       context: ./frontend
@@ -188,8 +109,7 @@ services:
         "-c",
         "node /workspace/.devcontainer/forward-ports.js & exec sleep infinity",
       ]
-    depends_on: [backend, worker, frontend]
+    depends_on: [backend, frontend]
 volumes:
   postgres-data: {}
   redis-data: {}
-  rabbitmq-data: {}

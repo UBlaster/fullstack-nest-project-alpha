@@ -40,30 +40,6 @@
 			"remoteRoot": "/app",
 			"outFiles": ["${workspaceFolder}/backend/dist/**/*.js"],
 			"skipFiles": ["<node_internals>/**", "**/node_modules/**"]
-		},
-		{
-			"name": "Worker: attach Docker from host (9230)",
-			"type": "node",
-			"request": "attach",
-			"address": "127.0.0.1",
-			"port": 9230,
-			"restart": true,
-			"timeout": 30000,
-			"sourceMaps": true,
-			"localRoot": "${workspaceFolder}/backend",
-			"remoteRoot": "/app",
-			"outFiles": ["${workspaceFolder}/backend/dist/**/*.js"],
-			"skipFiles": ["<node_internals>/**", "**/node_modules/**"]
-		}
-	],
-	"compounds": [
-		{
-			"name": "API + Worker: attach Docker",
-			"configurations": [
-				"NestJS: attach Docker from host (9229)",
-				"Worker: attach Docker from host (9230)"
-			],
-			"stopAll": true
 		}
 	]
 }
