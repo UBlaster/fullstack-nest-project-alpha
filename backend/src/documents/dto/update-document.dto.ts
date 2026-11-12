@@ -1,5 +1,5 @@
 import { Transform } from 'class-transformer';
-import { IsOptional, IsString, Length } from 'class-validator';
+import { IsOptional, IsString, Length, ValidateIf } from 'class-validator';
 
 export class UpdateDocumentDto {
 	@IsOptional()
@@ -8,7 +8,7 @@ export class UpdateDocumentDto {
 	@Length(1, 160)
 	title?: string;
 
-	@IsOptional()
+	@ValidateIf((_object: UpdateDocumentDto, value: unknown) => value !== undefined)
 	@IsString()
 	content?: string;
 }
