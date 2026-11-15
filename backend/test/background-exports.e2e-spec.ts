@@ -557,7 +557,10 @@ describe('Task 6 background exports (e2e)', () => {
 		const id = response.body.id as string;
 		exportIds.add(id);
 		expect(publish).not.toHaveBeenCalled();
-		await dispatcher.publishPending();
+		await until(async () => {
+			await dispatcher.publishPending();
+			return publish.mock.calls.some(([payload]) => payload.exportJobId === id);
+		});
 		expect(publish).toHaveBeenCalledWith({ exportJobId: id, schemaVersion: 1 }, `export-${id}`);
 		expect(await prisma.exportJob.findUniqueOrThrow({ where: { id } })).toMatchObject({
 			status: 'QUEUED',
@@ -870,17 +873,12 @@ describe('Task 6 background exports (e2e)', () => {
 				type: OutboxEventType.EXPORT_REQUESTED,
 				aggregateId: job.id,
 				payload: { exportJobId: job.id, schemaVersion: 1 },
+				availableAt: new Date(0),
 			},
 		});
 		const release = queue.blockNext();
 		const first = dispatcher.publishPending();
-		for (
-			let attempt = 0;
-			attempt < 20 && queue.exportCalls.at(-1)?.payload.exportJobId !== job.id;
-			attempt += 1
-		) {
-			await new Promise((resolve) => setTimeout(resolve, 5));
-		}
+		await until(async () => queue.exportCalls.some((call) => call.payload.exportJobId === job.id));
 		const second = await dispatcher.publishPending();
 		expect(second).toBe(0);
 		release();
@@ -897,6 +895,7 @@ describe('Task 6 background exports (e2e)', () => {
 				type: OutboxEventType.EXPORT_REQUESTED,
 				aggregateId: job.id,
 				payload: { exportJobId: job.id, schemaVersion: 1 },
+				availableAt: new Date(0),
 			},
 		});
 		queue.failNext = true;
@@ -920,6 +919,7 @@ describe('Task 6 background exports (e2e)', () => {
 				type: OutboxEventType.EXPORT_REQUESTED,
 				aggregateId: job.id,
 				payload: { exportJobId: job.id, schemaVersion: 1 },
+				availableAt: new Date(0),
 				claimedAt: new Date(Date.now() - 60_000),
 				claimToken: 'stopped-dispatcher',
 			},
@@ -1230,6 +1230,15 @@ describe('Task 6 background exports (e2e)', () => {
 			);
 			expect(heartbeats).toHaveLength(1);
 			expect(heartbeats[0][0].where?.processingToken).toEqual(expect.any(String));
+			// Spy видит вызов до commit: ждём фактическую запись heartbeat, сохраняя окно throttle выше.
+			await until(async () => {
+				const current = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
+				return (
+					current.heartbeatAt !== null &&
+					current.startedAt !== null &&
+					current.heartbeatAt.getTime() > current.startedAt.getTime()
+				);
+			});
 			const active = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });
 			expect(active.status).toBe('PROCESSING');
 			expect(active.heartbeatAt!.getTime()).toBeGreaterThan(active.startedAt!.getTime());
