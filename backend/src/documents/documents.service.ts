@@ -3,6 +3,8 @@ import { DocumentStatus } from '@prisma/client';
 import { AccessPolicyService } from '../access/access-policy.service';
 import { CacheService } from '../cache/cache.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { toDocumentResponse } from './document-response.mapper';
+import { documentResponseSelect } from './document-response.select';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import { SearchDocumentsQueryDto } from './dto/search-documents-query.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
@@ -95,28 +97,41 @@ export class DocumentsService {
 
 	async list(userId: string, projectId: string) {
 		await this.accessPolicy.requireProject(userId, projectId, 'view', 'document');
-		return this.prisma.document.findMany({
+		const documents = await this.prisma.document.findMany({
 			where: { projectId },
-			include: {
+			select: {
+				...documentResponseSelect,
 				author: {
 					select: { name: true },
 				},
 			},
 			orderBy: { updatedAt: 'desc' },
 		});
+		return documents.map((document) => ({
+			...toDocumentResponse(document),
+			author: document.author,
+		}));
 	}
 
 	async get(userId: string, documentId: string) {
 		await this.accessPolicy.requireDocument(userId, documentId, 'view');
-		return this.prisma.document.findUnique({
+		const document = await this.prisma.document.findUnique({
 			where: { id: documentId },
-			include: {
+			select: {
+				...documentResponseSelect,
 				author: {
 					select: { name: true },
 				},
 				project: true,
 			},
 		});
+		return document
+			? {
+					...toDocumentResponse(document),
+					author: document.author,
+					project: document.project,
+				}
+			: null;
 	}
 
 	async create(userId: string, projectId: string, dto: CreateDocumentDto) {
@@ -124,13 +139,14 @@ export class DocumentsService {
 		const document = await this.prisma.document.create({
 			data: {
 				title: dto.title,
-				content: dto.content,
+				body: dto.content,
 				projectId,
 				authorId: userId,
 			},
+			select: documentResponseSelect,
 		});
 		await this.cache.invalidateWorkspace(context.workspaceId);
-		return document;
+		return toDocumentResponse(document);
 	}
 
 	async update(userId: string, documentId: string, dto: UpdateDocumentDto) {
@@ -144,11 +160,12 @@ export class DocumentsService {
 			where: { id: documentId },
 			data: {
 				title: dto.title,
-				content: dto.content,
+				...(dto.content !== undefined ? { body: dto.content } : {}),
 			},
+			select: documentResponseSelect,
 		});
 		await this.cache.invalidateWorkspace(context.project.workspaceId);
-		return document;
+		return toDocumentResponse(document);
 	}
 
 	async archive(userId: string, documentId: string) {
@@ -156,17 +173,19 @@ export class DocumentsService {
 		const document = await this.prisma.document.update({
 			where: { id: documentId },
 			data: { status: DocumentStatus.ARCHIVED },
+			select: documentResponseSelect,
 		});
 		await this.cache.invalidateWorkspace(context.project.workspaceId);
-		return document;
+		return toDocumentResponse(document);
 	}
 
 	async remove(userId: string, documentId: string) {
 		const context = await this.accessPolicy.requireDocument(userId, documentId, 'delete');
 		const document = await this.prisma.document.delete({
 			where: { id: documentId },
+			select: documentResponseSelect,
 		});
 		await this.cache.invalidateWorkspace(context.project.workspaceId);
-		return document;
+		return toDocumentResponse(document);
 	}
 }

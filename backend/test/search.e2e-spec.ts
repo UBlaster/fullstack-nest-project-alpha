@@ -113,7 +113,7 @@ describe('Task 3 PostgreSQL document search (e2e)', () => {
 			overrides: Partial<{
 				projectId: string;
 				authorId: string;
-				content: string;
+				body: string;
 				status: DocumentStatus;
 				updatedAt: Date;
 			}> = {},
@@ -122,7 +122,7 @@ describe('Task 3 PostgreSQL document search (e2e)', () => {
 			projectId,
 			authorId: owner.id,
 			title,
-			content: '',
+			body: '',
 			status: DocumentStatus.ACTIVE,
 			updatedAt: commonUpdatedAt,
 			...overrides,
@@ -131,22 +131,22 @@ describe('Task 3 PostgreSQL document search (e2e)', () => {
 		await prisma.document.createMany({
 			data: [
 				document('task3-contract-exact', 'API deployment handbook', {
-					content: 'private exact-match body',
+					body: 'private exact-match body',
 				}),
 				document('task3-contract-typo', 'API deplyoment handbook', {
 					projectId: secondProjectId,
 					authorId: member.id,
-					content: 'private typo body',
+					body: 'private typo body',
 					status: DocumentStatus.DRAFT,
 				}),
 				document('task3-contract-case', 'api deployment HANDBOOK', {
-					content: 'private case body',
+					body: 'private case body',
 				}),
 				document('task3-content-only', 'Completely unrelated subject', {
-					content: 'API deployment handbook',
+					body: 'API deployment handbook',
 				}),
 				document('task3-archived', 'Archived obsidian beacon', {
-					content: 'must stay private',
+					body: 'must stay private',
 					status: DocumentStatus.ARCHIVED,
 				}),
 				document('task3-rank-a', 'Quasar ranking nebula'),
@@ -169,7 +169,7 @@ describe('Task 3 PostgreSQL document search (e2e)', () => {
 			data: document('task3-foreign-document', 'API deployment handbook', {
 				projectId: foreignProjectId,
 				authorId: foreignOwner.id,
-				content: 'foreign private body',
+				body: 'foreign private body',
 			}),
 		});
 

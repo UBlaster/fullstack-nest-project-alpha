@@ -68,7 +68,10 @@ export class AccessPolicyService {
 	async requireDocument(userId: string, documentId: string, action: AccessAction) {
 		const document = await this.prisma.document.findUnique({
 			where: { id: documentId },
-			include: {
+			select: {
+				id: true,
+				projectId: true,
+				authorId: true,
 				project: {
 					select: { workspaceId: true },
 				},

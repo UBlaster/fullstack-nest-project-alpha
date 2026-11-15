@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider          = "postgresql"
+  url               = env("DATABASE_URL")
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
 }
 
 enum WorkspaceRole {
@@ -106,7 +107,7 @@ model Document {
   projectId String
   authorId  String
   title     String
-  content   String
+  body      String
   status    DocumentStatus @default(DRAFT)
   createdAt DateTime       @default(now())
   updatedAt DateTime       @updatedAt
@@ -116,6 +117,7 @@ model Document {
 
   @@index([projectId])
   @@index([authorId])
+  @@index([title(ops: raw("gin_trgm_ops"))], type: Gin, map: "Document_title_trgm_idx")
 }
 
 model DocumentFile {

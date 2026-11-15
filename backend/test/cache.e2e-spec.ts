@@ -132,7 +132,7 @@ describeWithRedis('Task 4 Redis cache-aside (e2e)', () => {
 							create: {
 								id: ids.document,
 								title: 'Orchid quantum manual',
-								content: 'private task4 content',
+								body: 'private task4 content',
 								authorId: owner.id,
 							},
 						},
@@ -155,7 +155,7 @@ describeWithRedis('Task 4 Redis cache-aside (e2e)', () => {
 							create: {
 								id: ids.foreignDocument,
 								title: 'Orchid quantum manual',
-								content: 'foreign private content',
+								body: 'foreign private content',
 								authorId: foreignOwner.id,
 							},
 						},
@@ -383,14 +383,14 @@ describeWithRedis('Task 4 Redis cache-aside (e2e)', () => {
 					projectId: ids.project,
 					authorId: ownerId.id,
 					title: query,
-					content: 'local',
+					body: 'local',
 				},
 				{
 					id: foreignIsolationDocumentId,
 					projectId: ids.foreignProject,
 					authorId: foreignOwner.id,
 					title: query,
-					content: 'foreign',
+					body: 'foreign',
 				},
 			],
 		});
@@ -613,7 +613,7 @@ describeWithoutRedis('Task 4 degraded mode with Redis stopped (e2e)', () => {
 							create: {
 								id: degradedDocumentId,
 								title: 'Degraded redis search',
-								content: '',
+								body: '',
 								authorId: owner.id,
 							},
 						},
@@ -635,7 +635,7 @@ describeWithoutRedis('Task 4 degraded mode with Redis stopped (e2e)', () => {
 							create: {
 								id: ids.foreignDocument,
 								title: 'Degraded redis search',
-								content: 'foreign private content',
+								body: 'foreign private content',
 								authorId: foreignOwner.id,
 							},
 						},

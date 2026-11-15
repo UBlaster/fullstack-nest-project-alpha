@@ -178,7 +178,7 @@ describeYandex('Task 6 real Yandex Object Storage acceptance', () => {
 								create: {
 									id: `${runId}-escaped`,
 									title: 'Yandex, quote " and\nnewline',
-									content: 'YALC-PRIVATE-CONTENT',
+									body: 'YALC-PRIVATE-CONTENT',
 									authorId: ownerId,
 								},
 							},
@@ -201,7 +201,7 @@ describeYandex('Task 6 real Yandex Object Storage acceptance', () => {
 							create: {
 								id: `${runId}-foreign-document`,
 								title: 'FOREIGN-YANDEX-DOCUMENT',
-								content: 'FOREIGN-PRIVATE',
+								body: 'FOREIGN-PRIVATE',
 								authorId: ownerId,
 							},
 						},
@@ -216,7 +216,7 @@ describeYandex('Task 6 real Yandex Object Storage acceptance', () => {
 					projectId: otherProjectId,
 					authorId: ownerId,
 					title: `Yandex row ${offset + index} ${'x'.repeat(60)}`,
-					content: 'YALC-PRIVATE-BATCH',
+					body: 'YALC-PRIVATE-BATCH',
 					status: (['DRAFT', 'ACTIVE', 'ARCHIVED'] as const)[index % 3],
 				})),
 			});

@@ -13,6 +13,7 @@
 		"prisma:seed": "prisma db seed",
 		"storage:cleanup-pending": "ts-node src/storage/cleanup-pending.ts",
 		"storage:orphan-check": "ts-node src/storage/orphan-check.ts",
+		"backfill:document-body": "ts-node scripts/backfill-document-body.ts",
 		"test:e2e": "jest --config ./test/jest-e2e.json",
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",

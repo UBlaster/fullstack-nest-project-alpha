@@ -191,7 +191,7 @@ describe('Task 5 object storage and streaming export (e2e)', () => {
 							create: {
 								id: ids.document,
 								title: 'Comma, quote " and\nnewline',
-								content: 'task5-secret-content',
+								body: 'task5-secret-content',
 								authorId: owner.id,
 							},
 						},
@@ -213,7 +213,7 @@ describe('Task 5 object storage and streaming export (e2e)', () => {
 							create: {
 								id: ids.foreignDocument,
 								title: 'Foreign task 5 document',
-								content: 'foreign-secret-content',
+								body: 'foreign-secret-content',
 								authorId: foreignOwner.id,
 							},
 						},

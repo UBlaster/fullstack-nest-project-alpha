@@ -115,6 +115,10 @@ export async function seedDatabase(prisma: PrismaClient) {
 			});
 
 			for (let documentIndex = 0; documentIndex < 30; documentIndex++) {
+				const body =
+					`Учебный документ ${documentIndex + 1}. Архитектура, API, database migrations and deployment notes. `.repeat(
+						(documentIndex % 4) + 1,
+					);
 				await prisma.document.upsert({
 					where: {
 						id: `seed-document-${workspaceIndex}-${projectIndex}-${documentIndex}`,
@@ -125,14 +129,12 @@ export async function seedDatabase(prisma: PrismaClient) {
 						projectId: project.id,
 						authorId: memberUsers[(documentIndex + projectIndex) % memberUsers.length].id,
 						title: `Document ${documentIndex + 1}: API and architecture`,
-						content:
-							`Учебный документ ${documentIndex + 1}. Архитектура, API, database migrations and deployment notes. `.repeat(
-								(documentIndex % 4) + 1,
-							),
+						body,
 						status: [DocumentStatus.DRAFT, DocumentStatus.ACTIVE, DocumentStatus.ARCHIVED][
 							documentIndex % 3
 						],
 					},
+					select: { id: true },
 				});
 			}
 		}

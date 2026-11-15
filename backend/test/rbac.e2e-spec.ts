@@ -107,7 +107,7 @@ describe('Task 2 RBAC and workspace isolation (e2e)', () => {
 							create: {
 								id: documentId,
 								title: 'Task 2 Document',
-								content: 'Primary document',
+								body: 'Primary document',
 								authorId: owner.id,
 							},
 						},
@@ -132,7 +132,7 @@ describe('Task 2 RBAC and workspace isolation (e2e)', () => {
 							create: {
 								id: foreignDocumentId,
 								title: 'Foreign Document',
-								content: 'Foreign document',
+								body: 'Foreign document',
 								authorId: foreignOwner.id,
 							},
 						},

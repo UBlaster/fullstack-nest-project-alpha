@@ -2,6 +2,8 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { ProjectStatus } from '@prisma/client';
 import { AccessPolicyService } from '../access/access-policy.service';
 import { CacheService } from '../cache/cache.service';
+import { toDocumentResponse } from '../documents/document-response.mapper';
+import { documentResponseSelect } from '../documents/document-response.select';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
@@ -44,15 +46,33 @@ export class ProjectsService {
 
 	async get(userId: string, projectId: string) {
 		const project = await this.accessPolicy.requireProject(userId, projectId, 'view');
-		return this.prisma.project.findUnique({
+		const result = await this.prisma.project.findUnique({
 			where: { id: project.id },
 			include: {
 				documents: {
-					include: { author: { select: { name: true } } },
+					select: {
+						...documentResponseSelect,
+						author: { select: { name: true } },
+					},
 					orderBy: { updatedAt: 'desc' },
 				},
 			},
 		});
+		if (!result) return null;
+		return {
+			id: result.id,
+			workspaceId: result.workspaceId,
+			name: result.name,
+			description: result.description,
+			status: result.status,
+			createdById: result.createdById,
+			createdAt: result.createdAt,
+			updatedAt: result.updatedAt,
+			documents: result.documents.map((document) => ({
+				...toDocumentResponse(document),
+				author: document.author,
+			})),
+		};
 	}
 
 	async create(userId: string, workspaceId: string, dto: CreateProjectDto) {

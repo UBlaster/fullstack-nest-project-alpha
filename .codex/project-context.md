@@ -1,54 +1,81 @@
-# Контекст стартовой базы после Task 6
+# Контекст Task 7
 
-## Checkout и база
+## Checkout и итог
 
-- Ветка: `feature/task-7-start`.
-- Проверенная полная база Task 6: `15e61b5dff91c88fc1ce5633ebfd4c400cad1b32`.
-- Код и тесты Task 6 сохранены полностью. Следующее задание ещё не реализовано;
-  его Task/Guide и цель нужно прочитать перед началом работы.
-- Подготовка Task 7: PATCH документа отклоняет `content: null` и другие нестроковые
-  значения на HTTP-границе; отсутствие поля и пустая строка допустимы.
-  Схема `Document` не менялась, перенос `content` в `body` ещё не начат.
+- Ветка TT7, база feature/task-7-start на c3198ed7307285b14914c8072bba03ee486b7c4c.
+  Полная проверенная база Task 6: 15e61b5dff91c88fc1ce5633ebfd4c400cad1b32.
+- Task 7 завершён целиком: подготовка, A, перенос данных, B, C, D и завершение стендов.
+  Этот checkout содержит готовое решение; следующих задач здесь ещё нет.
+- Подробные команды, результаты всех фаз и сводка изменений:
+  docs/database/07-zero-downtime-content-migration.md.
 
-## Уже реализовано
+## Финальное поведение D
 
-NestJS + Prisma/PostgreSQL backend с DI, feature modules и
-Controller → Service → PrismaService; React/Vite frontend.
-JWT, workspace RBAC/isolation, CRUD/search, Redis cache-aside и private-файлы Yandex S3.
+- NestJS → Service → PrismaService, feature modules/DI, JWT и workspace RBAC сохранены.
+  Redis кеширует metadata; RabbitMQ/amqplib обслуживает фоновый CSV с отдельным worker.
+  Private files/CSV используют прежний S3 bucket; внешний API не переименовывался.
+- Document.body — обязательная строка в SQL/Prisma D, legacy content в модели/БД отсутствует.
+  HTTP DTO/JSON по-прежнему content: mapper явно собирает прежние поля из body и скрывает
+  внутренний body. Author/project и nested documents сохранены; frontend не менялся.
+- Create/text PATCH и seed пишут только body. Title-only PATCH текст не трогает.
+  Null/нестроковый content даёт HTTP 400 до записи; пустая строка допустима.
+- DocumentsService, ProjectsService nested documents, AccessPolicy.requireDocument и
+  возвращаемые записи используют явные проекции. SQL C/D независим от legacy,
+  включая file/capabilities authorization и seed upsert select:{id:true}.
+- История содержит 13 реальных migrations: исходные 7, expand A, nullable legacy B,
+  затем 20261112191141_document_body_check, 20261112191142_document_body_check_validate,
+  20261112191143_document_body_not_null, 20261112191144_document_content_drop.
+  Каждая DDL в отдельной короткой транзакции с lock 1s / statement 5s.
+  Valid CHECK document_body_nn оставлен, прежний GIN title/gin_trgm_ops сохранён.
+- Backend/scripts/backfill-document-body.ts — исторический инструмент только A:
+  missing/reconcile, keyset, короткие commits/restart. Current D client отвергается
+  до подключения к БД; из операционных C/D artifacts alias/script исключены.
+  После первого C копирование content → body и запуск A/R0 запрещены.
+  После contract код можно вернуть только к проверенному C; схему исправлять вперёд.
 
-- Task 5: presigned file upload/download, DocumentFile lifecycle, синхронный CSV.
-- Task 6: фоновый workspace CSV, отдельный worker и RabbitMQ через amqplib.
-  Redis используется для кеша, транспорт jobs — RabbitMQ.
-- `POST /workspaces/:workspaceId/exports` атомарно создаёт ExportJob + OutboxEvent,
-  отвечает 202; `GET/DELETE /exports/:id` доступны автору либо OWNER.
-  Для чужого workspace возвращается hidden 404.
-- Durable quorum main/DLQ, четыре TTL retry queues, lease queue,
-  publisher confirms, manual ACK/prefetch 2; пять попыток, backoff 5/10/20/40 секунд.
-  Идемпотентность обеспечивается PostgreSQL/CAS, processingToken и heartbeat.
-- CSV: keyset pages, backpressure, S3 multipart; cancel/recovery/retention выполняют
-  точечный cleanup своих attempt keys. File orphan cleanup ограничен documents namespace.
-- UI: одна кнопка подготовка → disabled QUEUED/PROCESSING → скачивание;
-  свежая ссылка перед скачиванием и возврат к подготовке при истечении хранения.
-- Prisma models ExportJob/OutboxEvent и migration Task 6 уже существуют.
-  API/worker подключены в Compose, есть отдельные debug profiles и безопасная S3-диагностика.
+## Обычный запуск и сохранённые данные
 
-## Ориентиры и проверки
+- Все созданные runtime-процессы и учебные контейнеры остановлены. Исходные .env,
+  Compose и Dockerfiles не менялись; три env-файла проверены по исходным SHA-256.
+- Проверенный обычный D-контур — отдельный Compose project task7-final, со своими
+  тремя сохранёнными volumes и seed из 3600 документов. Старый project/volumes сохранены.
+  Для запуска использовать ровно 7 сервисов, без ненужного workspace service:
+  docker compose -p task7-final up -d postgres redis rabbitmq db-init backend worker frontend
+- task7-pg, task7-redis, task7-rabbitmq тоже остановлены, volumes не удалены.
+  В task7_dev и task7_rehearsal финальная D-схема и по 3600 исходных seed-документов;
+  каждый body проверен против исходного текста. Rehearsal runtime fixtures удалены,
+  остались 4 seed users, 3 workspace, 120 projects; files/jobs/outbox пусты.
+- Frozen artifacts R0/A/A-backfill/B/C/D и manifest/client/build hashes сохранены в
+  .local/task7/artifacts. Тот же C проверен после D без пересборки/генерации клиента.
+  Backups до contract и итоговый D до cleanup — .local/task7/backups.
+- Закрытые env/fixtures и учёт ресурсов остаются только в .local/task7; их значения
+  не выводить/не коммитить. Bucket не удалялся: собственные 7 export objects удалены,
+  9 известных ключей подтверждены отсутствующими. Redis regression DB1 очищена;
+  чужие объекты/queues/volumes не затрагивались.
 
-- Код: `backend/src/exports/`, `outbox/`, `queue/`, `worker/`, `storage/`,
-  `frontend/src/pages/project/ui/ProjectPage.tsx`.
-- Тесты Task 6: API/worker, processor, RabbitMQ transport, storage/shutdown/orphans;
-  `background-export-yandex.e2e-spec.ts` — opt-in настоящий Yandex S3
-  (`TASK6_YANDEX_E2E=true`), отдельная тестовая БД и уникальные очереди.
-- Пройден 231 test: 230 в полном прогоне с настройками Яндекса и отдельный Redis-down.
-  Проверены реальный multipart >5 MiB, скачивание CSV из 40001 документа через UI,
-  cancel/retry/DLQ/retention; ошибки CompleteMultipartUpload создавались управляемо.
-  Собственные облачные fixtures очищены, остаток объектов и incomplete multipart — 0.
-- Backend/frontend build, строгий app/test typecheck, lint и Compose проверены.
-  После удаления английских комментариев дополнительно пройдены 13 diagnostic tests.
-- Сборка приложения отделена от тестов через `tsconfig.build.json`;
-  Jest использует строгий `backend/test/tsconfig.json`.
-  `test-config.ts` изолирует ConfigService от process.env.
-- Проверки с записью выполняются только на выделенной тестовой БД и собственных S3 fixtures.
-  Общую схему/опубликованные migrations не переписывать без требования нового задания.
-- `update-document-validation.e2e-spec.ts`: 9 проверок настоящего ValidationPipe/DTO
-  без БД и сети прошли; ESLint и Prettier изменённых файлов также прошли.
+## Проверки
+
+- Полная регрессия D: 273 PASS, 46 opt-in SKIP, 17 активных suites. Строгие app/test
+  typechecks, ESLint/Prettier изменённых файлов, backend и frontend build прошли.
+- A/перенос/B проверены ранее. B и C прошли по 10 минут: по 172 чтения и 43 записи
+  через два instances/два workspace; пустой/Unicode текст, права, целостность и логи.
+- Same frozen C suite до/после D: 11/11 в каждой фазе; неизменность 95 исходников,
+  18 файлов клиента и 4 test/config файлов подтверждена. SQL без legacy проверен.
+- На заполненной rehearsal проверены lock timeout/rollback/history recovery,
+  все 4 DDL в budget, C/D CRUD и реальные file upload/download/delete, оба workers,
+  S3 CSV, cache invalidation и D → C → D без отката схемы. Новых migration-related 5xx нет.
+- Fresh обычный Compose D: 13/13 migrations, seed3600, frontend, CRUD, Redis TTL/cache,
+  sync/async CSV и S3 проверены; собственные fixtures удалены, очереди пусты.
+- Исторические A/B/backfill fixtures используют typed parameterized SQL для своих
+  схем. Обычные тестовые DB-fixtures переведены на body; HTTP content сохранён.
+  У старых heartbeat/outbox тестов устранены readiness races; подтверждён clock skew
+  Docker PG вперёд на 160–164ms. Production export-код и системные часы не менялись.
+- Фазовые тесты совместимы со стартовой Prisma-моделью без body. Test-only contract
+  helper загружает backfill CLI лениво и не содержит его реализации. Без CLI/opt-in
+  no-DB suites пропускаются; явный opt-in без реализации даёт понятный FAIL.
+  После этих переносимых адаптаций повторно прошли строгий test typecheck,
+  lint/format и 29 no-DB checks; полная инфраструктурная регрессия не повторялась.
+- Сводки в .local/task7: final-regression-results.local, final-data-verification.local,
+  release-d-results.local, rehearsal-cleanup-results.local,
+  rehearsal-containers-stop-results.local и final-compose-*.local.
+  Новая задача ещё не начата; состояние Task 7 не подменять будущим планом.
