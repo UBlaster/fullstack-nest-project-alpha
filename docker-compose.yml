@@ -56,6 +56,7 @@ services:
       - ./backend/prisma:/app/prisma
       - ./backend/test:/app/test
       - ./backend/tsconfig.json:/app/tsconfig.json
+      - ./backend/tsconfig.build.json:/app/tsconfig.build.json
       - ./backend/nest-cli.json:/app/nest-cli.json
     command: ["sh", "-c", "npx prisma generate && npm run start:dev"]
     depends_on: {db-init: {condition: service_completed_successfully}}

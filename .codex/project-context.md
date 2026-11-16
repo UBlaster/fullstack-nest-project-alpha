@@ -53,8 +53,14 @@ AWS SDK v3 и storage scripts уже есть в `backend/package.json`,
 `backend/test/object-storage.e2e-spec.ts` уже импортирует отсутствующие модули текущей задачи:
 это acceptance-заготовка, общий test:e2e пока не обещает зелёный результат.
 `diagnostics.e2e-spec.ts` проверяет request context и безопасное логирование без БД/S3.
-Полная сборка включает acceptance-тест и пока блокируется отсутствующими
-`document-files`/storage/export и моделью `DocumentFile` в неизменённом object-storage тесте.
+Конфиги приложения и тестов разделены: основной tsconfig проверяет src и Prisma,
+tsconfig.build собирает только src в dist/main.js; Dockerfile.dev и Compose подключают
+build-конфиг. Jest использует отдельный test/tsconfig.json со строгими проверками.
+Acceptance-тесты сохранены: отсутствующие `document-files`/storage/export и модель
+`DocumentFile` остаются работой Task 5, их ошибки не блокируют запуск приложения.
+После разделения проверены app build/default typecheck, Docker dev/production,
+миграции/seed и HTTP health/login/projects в dev и production. Diagnostics — 8/8;
+строгая проверка acceptance по-прежнему выявляет отсутствующую реализацию Task 5.
 В настроенном окружении: `docker compose config --quiet`;
 `docker compose exec -T <backend|frontend> npm run <script>`, scripts format:check/lint/build.
 Backend E2E: `test:e2e -- --runInBand object-storage.e2e-spec.ts` после реализации;
