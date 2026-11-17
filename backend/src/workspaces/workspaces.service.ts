@@ -1,5 +1,5 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
-import { WorkspaceRole, WorkspaceStatus } from '@prisma/client';
+import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
+import { Prisma, WorkspaceRole, WorkspaceStatus } from '@prisma/client';
 import { AccessPolicyService } from '../access/access-policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateWorkspaceDto } from './dto/create-workspace.dto';
@@ -64,8 +64,16 @@ export class WorkspacesService {
 
 	async remove(userId: string, workspaceId: string) {
 		await this.accessPolicy.requireWorkspace(userId, workspaceId, 'delete');
-		return this.prisma.workspace.delete({
-			where: { id: workspaceId },
-		});
+		try {
+			return await this.prisma.workspace.delete({ where: { id: workspaceId } });
+		} catch (error: unknown) {
+			if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2003') {
+				throw new ConflictException({
+					code: 'WORKSPACE_HAS_PAYMENTS',
+					message: 'Историю платежей нужно сохранить. Архивируйте workspace вместо удаления.',
+				});
+			}
+			throw error;
+		}
 	}
 }

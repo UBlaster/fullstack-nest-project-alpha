@@ -4,11 +4,14 @@ import { NestFactory } from '@nestjs/core';
 import { WorkerModule } from './worker.module';
 import { WorkerRuntimeService } from './worker-runtime.service';
 import { shutdownWorker } from './worker-shutdown';
+import { PaymentMaintenanceService } from '../payments/payment-maintenance.service';
 
 async function bootstrap() {
 	const app = await NestFactory.createApplicationContext(WorkerModule);
 	const runtime = app.get(WorkerRuntimeService);
+	const payments = app.get(PaymentMaintenanceService);
 	runtime.start();
+	payments.start();
 	new Logger('Release').log(
 		JSON.stringify({
 			event: 'release_started',
@@ -22,7 +25,17 @@ async function bootstrap() {
 	const shutdown = async () => {
 		if (stopping) return;
 		stopping = true;
-		await shutdownWorker(runtime, app);
+		await shutdownWorker(
+			{
+				close: async () => {
+					const results = await Promise.allSettled([payments.stop(), runtime.close()]);
+					if (results.some((result) => result.status === 'rejected')) {
+						throw new Error('Worker runtime shutdown failed');
+					}
+				},
+			},
+			app,
+		);
 	};
 	const stop = () => {
 		void shutdown().catch((error: unknown) => {

@@ -130,6 +130,15 @@ export function ProjectPage() {
 			<Link to="/projects">← Проекты</Link>
 			<h1>{project.name}</h1>
 			<p>{project.description}</p>
+			<section className="card workspace-payment-entry">
+				<div>
+					<h2>Платежи workspace</h2>
+					<p className="muted">Тестовая покупка на 100 ₽ и история оплат рабочего пространства.</p>
+				</div>
+				<Link className="button-link" to={`/workspaces/${project.workspaceId}`}>
+					Открыть платежи
+				</Link>
+			</section>
 			<div className="section-heading">
 				<h2>Документы ({documents.length})</h2>
 				<button

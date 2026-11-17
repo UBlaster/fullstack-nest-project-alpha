@@ -1,3 +1,4 @@
+import { once } from 'node:events';
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { WorkspaceRole } from '@prisma/client';
@@ -513,8 +514,10 @@ describeWithRedis('Task 4 Redis cache-aside (e2e)', () => {
 		const shutdownRedis = shutdownApp.get<Redis>(REDIS_CLIENT);
 		if (shutdownRedis.status === 'wait') await shutdownRedis.connect();
 		const quit = jest.spyOn(shutdownRedis, 'quit');
+		// The QUIT reply can precede the final socket close notification.
+		const ended = once(shutdownRedis, 'end', { signal: AbortSignal.timeout(500) });
 
-		await shutdownApp.close();
+		await Promise.all([shutdownApp.close(), ended]);
 
 		expect(quit).toHaveBeenCalledTimes(1);
 		expect(shutdownRedis.status).toBe('end');

@@ -1,5 +1,15 @@
 const API = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
+export class ApiError extends Error {
+	constructor(
+		message: string,
+		readonly status: number,
+	) {
+		super(message);
+		this.name = 'ApiError';
+	}
+}
+
 async function authenticatedFetch(path: string, options: RequestInit = {}) {
 	const token = localStorage.getItem('token');
 	const response = await fetch(API + path, {
@@ -15,15 +25,32 @@ async function authenticatedFetch(path: string, options: RequestInit = {}) {
 		},
 	});
 	if (!response.ok) {
-		throw new Error(
+		if (
+			response.status === 401 &&
+			path !== '/auth/login' &&
+			localStorage.getItem('token') === token
+		) {
+			localStorage.removeItem('token');
+			if (window.location.pathname !== '/login') {
+				const returnTo = window.location.pathname + window.location.search + window.location.hash;
+				window.location.replace(`/login?returnTo=${encodeURIComponent(returnTo)}`);
+			}
+		}
+		throw new ApiError(
 			(
 				await response.json().catch(() => ({
 					message: response.statusText,
 				}))
 			).message,
+			response.status,
 		);
 	}
 	return response;
+}
+
+export async function apiWithStatus<T>(path: string, options: RequestInit = {}) {
+	const response = await authenticatedFetch(path, options);
+	return { status: response.status, data: (await response.json()) as T };
 }
 
 export const api = async (path: string, options: RequestInit = {}) => {

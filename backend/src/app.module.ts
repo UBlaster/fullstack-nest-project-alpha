@@ -5,6 +5,7 @@ import { DocumentsModule } from './documents/documents.module';
 import { DocumentFilesModule } from './document-files/document-files.module';
 import { ExportsModule } from './exports/exports.module';
 import { OutboxModule } from './outbox/outbox.module';
+import { PaymentsModule } from './payments/payments.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ProjectsModule } from './projects/projects.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
@@ -32,6 +33,7 @@ class HealthController {
 		DocumentFilesModule,
 		ExportsModule,
 		OutboxModule,
+		PaymentsModule,
 	],
 	controllers: [HealthController],
 })

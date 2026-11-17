@@ -2,9 +2,16 @@ import { ForbiddenException } from '@nestjs/common';
 import { WorkspaceRole } from '@prisma/client';
 
 export type AccessAction = 'view' | 'create' | 'update' | 'archive' | 'delete';
-export type AccessResource = 'workspace' | 'project' | 'document';
+export type AccessResource = 'workspace' | 'project' | 'document' | 'payment';
 
 export const permissions: Record<AccessResource, Record<AccessAction, readonly WorkspaceRole[]>> = {
+	payment: {
+		view: [WorkspaceRole.OWNER],
+		create: [WorkspaceRole.OWNER],
+		update: [WorkspaceRole.OWNER],
+		archive: [WorkspaceRole.OWNER],
+		delete: [WorkspaceRole.OWNER],
+	},
 	workspace: {
 		view: [WorkspaceRole.OWNER, WorkspaceRole.MEMBER, WorkspaceRole.VIEWER],
 		create: [WorkspaceRole.OWNER, WorkspaceRole.MEMBER, WorkspaceRole.VIEWER],

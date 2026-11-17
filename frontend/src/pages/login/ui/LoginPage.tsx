@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../../../shared/api';
 
 export function LoginPage() {
 	const navigate = useNavigate();
+	const [searchParams] = useSearchParams();
 	const [email, setEmail] = useState('admin@example.com');
 	const [password, setPassword] = useState('password123');
 	const [error, setError] = useState('');
@@ -29,7 +30,14 @@ export function LoginPage() {
 							}),
 						});
 						localStorage.setItem('token', response.accessToken);
-						navigate('/projects');
+						const returnTo = searchParams.get('returnTo');
+						navigate(
+							returnTo &&
+								/^\/(projects|documents|workspaces|payments)(\/|\?|#|$)/.test(returnTo) &&
+								!returnTo.includes('\\')
+								? returnTo
+								: '/projects',
+						);
 					} catch (err: any) {
 						setError(err.message);
 					}

@@ -49,6 +49,18 @@ enum OutboxEventType {
   EXPORT_REQUESTED
 }
 
+enum PaymentStatus {
+  CREATED
+  PENDING
+  SUCCEEDED
+  CANCELLED
+  FAILED
+}
+
+enum PaymentPurpose {
+  WORKSPACE_DEMO
+}
+
 model User {
   id          String            @id @default(cuid())
   email       String            @unique
@@ -60,6 +72,7 @@ model User {
   projects    Project[]
   documents   Document[]
   exportJobs  ExportJob[]
+  payments    Payment[]
 }
 
 model Workspace {
@@ -71,6 +84,7 @@ model Workspace {
   members    WorkspaceMember[]
   projects   Project[]
   exportJobs ExportJob[]
+  payments   Payment[]
 }
 
 model WorkspaceMember {
@@ -183,4 +197,73 @@ model OutboxEvent {
   @@unique([type, aggregateId])
   @@index([publishedAt, availableAt, createdAt])
   @@index([claimedAt])
+}
+
+model Payment {
+  id                     String         @id @default(uuid()) @db.Uuid
+  workspaceId            String
+  userId                 String
+  purpose                PaymentPurpose
+  amountMinor            Int
+  currency               String
+  status                 PaymentStatus  @default(CREATED)
+  providerPaymentId      String?        @unique
+  confirmationUrl        String?
+  idempotencyKey         String         @db.Uuid
+  requestHash            String
+  providerIdempotenceKey String         @unique @db.Uuid
+  providerRequest        Json
+  firstDispatchedAt      DateTime?
+  createAttempts         Int            @default(0)
+  version                Int            @default(0)
+  needsReview            Boolean        @default(false)
+  lastErrorCode          String?
+  nextReconcileAt        DateTime       @default(now())
+  reconcileAttempts      Int            @default(0)
+  leaseToken             String?        @db.Uuid
+  leaseUntil             DateTime?
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
+  workspace              Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  user                   User           @relation(fields: [userId], references: [id], onDelete: Restrict)
+  events                 PaymentEvent[]
+  audits                 PaymentAudit[]
+
+  @@unique([userId, idempotencyKey])
+  @@index([workspaceId, createdAt, id])
+  @@index([status, nextReconcileAt, createdAt])
+}
+
+model PaymentEvent {
+  id               String    @id @default(uuid()) @db.Uuid
+  provider         String
+  eventType        String
+  providerObjectId String
+  paymentId        String?   @db.Uuid
+  result           String
+  errorCode        String?
+  processedAt      DateTime?
+  nextReconcileAt  DateTime  @default(now())
+  attempts         Int       @default(0)
+  leaseToken       String?   @db.Uuid
+  leaseUntil       DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  payment          Payment?  @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@unique([provider, eventType, providerObjectId])
+  @@index([result, nextReconcileAt])
+}
+
+model PaymentAudit {
+  id            String        @id @default(uuid()) @db.Uuid
+  paymentId     String        @db.Uuid
+  fromStatus    PaymentStatus
+  toStatus      PaymentStatus
+  reason        String
+  correlationId String
+  createdAt     DateTime      @default(now())
+  payment       Payment       @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@index([paymentId, createdAt])
 }

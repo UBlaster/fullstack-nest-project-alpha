@@ -12,7 +12,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 				</Link>
 				<button
 					onClick={() => {
-						localStorage.clear();
+						localStorage.removeItem('token');
 						navigate('/login');
 					}}
 				>
