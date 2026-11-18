@@ -54,14 +54,15 @@
 
 - Целевые проверки готового решения: backend 117 PASS, frontend 44 PASS; types,
   scoped lint/format и diff-check прошли. Полный прежний backend-набор не запускался.
-- При подготовке стартовых веток общий набор с замоканным провайдером: 13 PASS,
-  строгий test typecheck и scoped lint/format прошли. Записи только в task8_stripe_test.
+- Общий набор с замоканным провайдером проверен на Stripe: 12 PASS. Он использует
+  тестовые JWT, PostgreSQL и HTTP API. Записи выполнялись только в task8_stripe_test.
 - Общий набор backend/test/task8-payment-contract.e2e-spec.ts использует PaymentProviderMock
-  без проверки протоколов и подписей провайдеров, без фиксированной цены или валюты.
-  Подключение мока к Nest DI находится в task8-payment-contract.harness.ts;
-  notify передаёт уже проверенное уведомление в обработчик бизнес-событий.
-  Запуск включается явно через TASK8_CONTRACT_TESTS=true и выбор файла в Jest.
-  В стартовой Task 8 этот helper является заготовкой для подключения реализации ученика.
+  для общих сценариев. Цена берётся из обычного создания, событие поступает прямо
+  в обработчик бизнес-событий. SSE, подписи и протоколы покрывают отдельные тесты Task 9.
+- Подключение Nest DI и преобразование снимков находятся в task8-payment-contract.binding.ts.
+  Ученики заполняют только эту тестовую точку подключения для своего провайдера.
+  Запуск: TASK8_CONTRACT_TESTS=true, TASK8_CONTRACT_DATABASE_URL указывает на выделенную
+  локальную БД с миграциями Task 8, затем Jest с выбором task8-payment-contract.e2e-spec.ts.
 - SQL проверки использовали отдельную task8_stripe_test в существующем PostgreSQL;
   HTTP adapter — официальный SDK с управляемым test-only stub, не реальный Stripe.
   Проверено сохранение legacy Payment и default stripe при новой migration.

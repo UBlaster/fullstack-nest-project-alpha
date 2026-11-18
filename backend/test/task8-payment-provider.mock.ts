@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { setTimeout } from 'node:timers/promises';
+import { isDeepStrictEqual } from 'node:util';
 
 export interface MockPaymentRequest {
 	paymentId: string;
@@ -17,51 +19,49 @@ export interface MockPaymentSnapshot extends MockPaymentRequest {
 export class MockProviderUnavailable extends Error {}
 
 export class PaymentProviderMock {
-	readonly creates: Array<{ key: string; request: MockPaymentRequest }> = [];
+	readonly creates: Array<{ key: string; body: unknown }> = [];
 	readonly reads: string[] = [];
 	loseNextCreateResponse = false;
+	createDelayMs = 0;
 	private readonly rows = new Map<string, MockPaymentSnapshot>();
-	private readonly keys = new Map<string, string>();
-	private held?: { ready: () => void; released: Promise<void> };
+	private readonly keys = new Map<string, { id: string; body: unknown }>();
 
-	holdNextCreate() {
-		let ready: () => void = () => {};
-		let release: () => void = () => {};
-		const started = new Promise<void>((resolve) => (ready = resolve));
-		const released = new Promise<void>((resolve) => (release = resolve));
-		this.held = { ready, released };
-		return { started, release };
-	}
-
-	async create(request: MockPaymentRequest, key: string): Promise<MockPaymentSnapshot> {
-		this.creates.push({ key, request: structuredClone(request) });
-		let id = this.keys.get(key);
-		if (!id) {
-			id = randomUUID();
-			this.keys.set(key, id);
-			this.rows.set(id, {
+	async create(
+		request: MockPaymentRequest,
+		key: string,
+		body: unknown,
+	): Promise<MockPaymentSnapshot> {
+		const savedBody = structuredClone(body);
+		this.creates.push({ key, body: savedBody });
+		let previous = this.keys.get(key);
+		if (previous && !isDeepStrictEqual(previous.body, savedBody)) {
+			throw new Error('The provider key was reused with a different request body');
+		}
+		if (!previous) {
+			previous = { id: randomUUID(), body: savedBody };
+			this.keys.set(key, previous);
+			this.rows.set(previous.id, {
 				...request,
-				id,
+				id: previous.id,
 				status: 'pending',
 				test: true,
 				confirmationUrl: 'https://checkout.example.test/payment',
 			});
 		}
-		if (this.held) {
-			const held = this.held;
-			this.held = undefined;
-			held.ready();
-			await held.released;
-		}
+		if (this.createDelayMs > 0) await setTimeout(this.createDelayMs);
 		if (this.loseNextCreateResponse) {
 			this.loseNextCreateResponse = false;
 			throw new MockProviderUnavailable();
 		}
-		return this.get(id);
+		return this.snapshot(previous.id);
 	}
 
 	get(id: string): MockPaymentSnapshot {
 		this.reads.push(id);
+		return this.snapshot(id);
+	}
+
+	private snapshot(id: string): MockPaymentSnapshot {
 		const row = this.rows.get(id);
 		if (!row) throw new MockProviderUnavailable();
 		return structuredClone(row);
