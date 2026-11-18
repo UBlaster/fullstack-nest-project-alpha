@@ -4,6 +4,7 @@ export const paymentResponseSelect = {
 	id: true,
 	workspaceId: true,
 	purpose: true,
+	provider: true,
 	amountMinor: true,
 	currency: true,
 	status: true,

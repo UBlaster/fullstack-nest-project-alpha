@@ -7,7 +7,7 @@ import { createAppValidationPipe } from './validation.pipe';
 import { requestContextMiddleware } from './diagnostics/request-context';
 
 async function bootstrap() {
-	const app = await NestFactory.create(AppModule);
+	const app = await NestFactory.create(AppModule, { rawBody: true });
 	app.use(requestContextMiddleware);
 
 	app.enableCors({

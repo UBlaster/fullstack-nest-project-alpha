@@ -1,33 +1,39 @@
 import { Module } from '@nestjs/common';
 import { AccessModule } from '../access/access.module';
 import { PrismaModule } from '../prisma/prisma.module';
+import { PaymentWebhooksController } from './controllers/payment-webhooks.controller';
+import { PaymentsController } from './controllers/payments.controller';
+import { WorkspacePaymentsController } from './controllers/workspace-payments.controller';
 import { PaymentMaintenanceService } from './payment-maintenance.service';
+import { PaymentRecoveryService } from './payment-recovery.service';
 import { PaymentTransitionService } from './payment-transition.service';
-import { PaymentsController, WorkspacePaymentsController } from './payments.controller';
+import { PaymentWebhookService } from './payment-webhook.service';
 import { PaymentsService } from './payments.service';
 import { PaymentWebhookRateGuard } from './webhook-rate.guard';
 import {
-	YOOKASSA_API_BASE,
-	YOOKASSA_PRODUCTION_API,
-	YooKassaPaymentProvider,
-} from './yookassa-payment.provider';
+	STRIPE_API_BASE,
+	STRIPE_PRODUCTION_API,
+	StripePaymentProvider,
+} from './stripe-payment.provider';
 
 @Module({
 	imports: [PrismaModule, AccessModule],
-	controllers: [PaymentsController, WorkspacePaymentsController],
+	controllers: [PaymentsController, WorkspacePaymentsController, PaymentWebhooksController],
 	providers: [
 		PaymentsService,
+		PaymentRecoveryService,
 		PaymentTransitionService,
+		PaymentWebhookService,
 		PaymentMaintenanceService,
-		YooKassaPaymentProvider,
+		StripePaymentProvider,
 		PaymentWebhookRateGuard,
-		{ provide: YOOKASSA_API_BASE, useValue: YOOKASSA_PRODUCTION_API },
+		{ provide: STRIPE_API_BASE, useValue: STRIPE_PRODUCTION_API },
 	],
 	exports: [
 		PaymentsService,
 		PaymentTransitionService,
 		PaymentMaintenanceService,
-		YooKassaPaymentProvider,
+		StripePaymentProvider,
 	],
 })
 export class PaymentsModule {}

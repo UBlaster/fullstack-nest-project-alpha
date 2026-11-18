@@ -2,6 +2,11 @@ import { isTerminalPayment, type Payment } from './payment';
 
 export type PaymentPollingStop = 'terminal' | 'review' | 'limit' | 'error';
 
+export function paymentPollingStop(payment: Payment): 'terminal' | 'review' | null {
+	if (isTerminalPayment(payment)) return 'terminal';
+	return payment.needsReview ? 'review' : null;
+}
+
 interface PaymentPollingOptions {
 	load: (signal: AbortSignal) => Promise<Payment>;
 	onPayment: (payment: Payment) => void;
@@ -22,15 +27,13 @@ export function startPaymentPolling({
 	const controller = new AbortController();
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let attempts = 0;
-	let stopped = false;
 	const cancel = () => {
-		stopped = true;
 		clearTimeout(timer);
 		clearTimeout(deadline);
 		controller.abort();
 	};
 	const stop = (reason: PaymentPollingStop, error?: unknown) => {
-		if (stopped) return;
+		if (controller.signal.aborted) return;
 		cancel();
 		onStop(reason, error);
 	};
@@ -39,14 +42,14 @@ export function startPaymentPolling({
 		try {
 			attempts += 1;
 			const payment = await load(controller.signal);
-			if (stopped) return;
+			if (controller.signal.aborted) return;
 			onPayment(payment);
-			if (isTerminalPayment(payment)) return stop('terminal');
-			if (payment.needsReview) return stop('review');
+			const reason = paymentPollingStop(payment);
+			if (reason) return stop(reason);
 			if (attempts >= maxAttempts) return stop('limit');
 			timer = setTimeout(() => void poll(), intervalMs);
 		} catch (error) {
-			if (!stopped) stop('error', error);
+			stop('error', error);
 		}
 	};
 	void poll();

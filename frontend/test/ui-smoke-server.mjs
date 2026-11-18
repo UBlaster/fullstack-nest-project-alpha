@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import console from 'node:console';
 import process from 'node:process';
+import { clearInterval, clearTimeout, setInterval, setTimeout } from 'node:timers';
 import { URL } from 'node:url';
 
 // Isolated browser-test API. Never imported by the app or ordinary Compose.
@@ -11,6 +12,7 @@ const workspaces = [
 	{ id: 'ui-success', name: 'UI smoke · успешный результат' },
 	{ id: 'ui-member', name: 'UI smoke · MEMBER' },
 	{ id: 'ui-review', name: 'UI smoke · ручная сверка' },
+	{ id: 'ui-legacy', name: 'UI smoke · история другого провайдера' },
 ];
 const payments = new Map();
 const attempts = new Map();
@@ -18,13 +20,14 @@ const createRequests = [];
 let droppedResponse = false;
 const browserUserId = `ui-smoke-${randomUUID()}`;
 
-function payment(workspaceId, status, needsReview = false) {
+function payment(workspaceId, status, needsReview = false, provider = 'stripe') {
 	return {
 		id: randomUUID(),
 		workspaceId,
 		purpose: 'WORKSPACE_DEMO',
-		amountMinor: 10_000,
-		currency: 'RUB',
+		provider,
+		amountMinor: provider === 'stripe' ? 1_000 : 10_000,
+		currency: provider === 'stripe' ? 'USD' : 'RUB',
 		status,
 		confirmationUrl: null,
 		needsReview,
@@ -33,7 +36,11 @@ function payment(workspaceId, status, needsReview = false) {
 		updatedAt: new Date().toISOString(),
 	};
 }
-for (const row of [payment('ui-success', 'SUCCEEDED'), payment('ui-review', 'SUCCEEDED', true)]) {
+for (const row of [
+	payment('ui-success', 'SUCCEEDED'),
+	payment('ui-review', 'SUCCEEDED', true),
+	payment('ui-legacy', 'PENDING', false, 'yookassa'),
+]) {
 	payments.set(row.id, row);
 }
 
@@ -84,7 +91,12 @@ const server = http.createServer(async (request, response) => {
 			return respond(response, 403, { message: 'Forbidden' });
 		}
 		if (workspaceRoute[2] === '/payments/capabilities') {
-			return respond(response, 200, { enabled: workspace.id !== 'ui-missing' });
+			return respond(response, 200, {
+				enabled: workspace.id !== 'ui-missing',
+				provider: 'stripe',
+				amountMinor: 1_000,
+				currency: 'USD',
+			});
 		}
 		if (request.method === 'GET') {
 			return respond(
@@ -123,10 +135,35 @@ const server = http.createServer(async (request, response) => {
 			return respond(response, 202, row);
 		}
 	}
-	const paymentRoute = url.pathname.match(/^\/payments\/([^/]+)(\/reconcile)?$/);
+	const paymentRoute = url.pathname.match(/^\/payments\/([^/]+)(\/reconcile|\/events)?$/);
 	if (paymentRoute) {
 		const row = payments.get(paymentRoute[1]);
 		if (!row) return respond(response, 404, { message: 'Not found' });
+		if (paymentRoute[2] === '/events' && request.method === 'GET') {
+			response.writeHead(200, {
+				'Content-Type': 'text/event-stream',
+				'Cache-Control': 'no-cache',
+			});
+			let previous = '';
+			const emit = () => {
+				const content = JSON.stringify({ ...row, updatedAt: undefined });
+				if (previous !== content) {
+					previous = content;
+					response.write(`event: payment\ndata: ${JSON.stringify(row)}\n\n`);
+				}
+				if (['SUCCEEDED', 'CANCELLED', 'FAILED'].includes(row.status) || row.needsReview) {
+					response.end();
+				}
+			};
+			const timer = setInterval(emit, 2_000);
+			const deadline = setTimeout(() => response.end(), 300_000);
+			request.once('close', () => {
+				clearInterval(timer);
+				clearTimeout(deadline);
+			});
+			emit();
+			return;
+		}
 		if (request.method === 'POST' && paymentRoute[2]) {
 			row.needsReview = false;
 			row.lastErrorCode = null;

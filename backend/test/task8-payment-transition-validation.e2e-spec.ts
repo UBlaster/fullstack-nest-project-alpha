@@ -4,11 +4,8 @@ import {
 	PaymentTransitionService,
 	terminalPayment,
 } from '../src/payments/payment-transition.service';
-import {
-	PaymentProviderError,
-	YooKassaPaymentProvider,
-	YooKassaSnapshot,
-} from '../src/payments/yookassa-payment.provider';
+import { PaymentProviderError, PaymentProviderSnapshot } from '../src/payments/payment-provider';
+import { StripePaymentProvider } from '../src/payments/stripe-payment.provider';
 import { isolatedConfig } from './test-config';
 
 describe('Task 8 verified payment identity (no DB)', () => {
@@ -18,8 +15,9 @@ describe('Task 8 verified payment identity (no DB)', () => {
 		workspaceId: 'workspace-one',
 		userId: 'owner-one',
 		purpose: 'WORKSPACE_DEMO',
-		amountMinor: 10_000,
-		currency: 'RUB',
+		provider: 'stripe',
+		amountMinor: 1_000,
+		currency: 'USD',
 		status: PaymentStatus.CREATED,
 		providerPaymentId: null,
 		confirmationUrl: null,
@@ -39,18 +37,18 @@ describe('Task 8 verified payment identity (no DB)', () => {
 		createdAt: now,
 		updatedAt: now,
 	};
-	const snapshot: YooKassaSnapshot = {
-		id: 'provider-one',
+	const snapshot: PaymentProviderSnapshot = {
+		provider: 'stripe',
+		id: 'cs_test_operation_one',
 		status: 'succeeded',
 		test: true,
-		amount: { value: '100.00', currency: 'RUB' },
-		recipient: { account_id: '123456' },
+		amountMinor: 1_000,
+		currency: 'USD',
 		metadata: { paymentId: payment.id, workspaceId: payment.workspaceId },
+		clientReferenceId: payment.id,
+		confirmationUrl: null,
 	};
-	const provider = new YooKassaPaymentProvider(
-		isolatedConfig({ YOOKASSA_SHOP_ID: '123456' }),
-		'http://127.0.0.1:1',
-	);
+	const provider = new StripePaymentProvider(isolatedConfig(), 'http://127.0.0.1:1');
 	// validate is intentionally pure; a real DB client is never instantiated or connected.
 	const transitions = new PaymentTransitionService({} as PrismaService, provider);
 
@@ -67,39 +65,58 @@ describe('Task 8 verified payment identity (no DB)', () => {
 		).toThrow('PROVIDER_ID_MISMATCH');
 	});
 
-	it.each([
-		['live object', { ...snapshot, test: false }, 'PROVIDER_SHOP_OR_MODE_MISMATCH'],
-		[
-			'different shop',
-			{ ...snapshot, recipient: { account_id: '654321' } },
-			'PROVIDER_SHOP_OR_MODE_MISMATCH',
-		],
-		[
-			'different amount',
-			{ ...snapshot, amount: { value: '100.01', currency: 'RUB' } },
-			'PROVIDER_AMOUNT_MISMATCH',
-		],
-		[
-			'different currency',
-			{ ...snapshot, amount: { value: '100.00', currency: 'USD' } },
-			'PROVIDER_AMOUNT_MISMATCH',
-		],
-		[
-			'different local ID',
-			{ ...snapshot, metadata: { ...snapshot.metadata, paymentId: 'different' } },
-			'PROVIDER_METADATA_MISMATCH',
-		],
-		[
-			'different workspace',
-			{ ...snapshot, metadata: { ...snapshot.metadata, workspaceId: 'different' } },
-			'PROVIDER_METADATA_MISMATCH',
-		],
-		['path-like ID', { ...snapshot, id: '../payments/other' }, 'PROVIDER_INVALID_ID'],
-	])('refuses %s without trusting a succeeded label', (_name, input, code) => {
-		expect(() => transitions.validate(payment, input as YooKassaSnapshot)).toThrow(
+	it.each<{ name: string; input: unknown; code: string }>([
+		{ name: 'live object', input: { ...snapshot, test: false }, code: 'PROVIDER_MODE_MISMATCH' },
+		{
+			name: 'snapshot from another provider',
+			input: { ...snapshot, provider: 'yookassa' },
+			code: 'PROVIDER_MODE_MISMATCH',
+		},
+		{
+			name: 'different amount',
+			input: { ...snapshot, amountMinor: 1_001 },
+			code: 'PROVIDER_AMOUNT_MISMATCH',
+		},
+		{
+			name: 'different currency',
+			input: { ...snapshot, currency: 'RUB' },
+			code: 'PROVIDER_AMOUNT_MISMATCH',
+		},
+		{
+			name: 'different local ID',
+			input: {
+				...snapshot,
+				clientReferenceId: 'different',
+				metadata: { ...snapshot.metadata, paymentId: 'different' },
+			},
+			code: 'PROVIDER_METADATA_MISMATCH',
+		},
+		{
+			name: 'different workspace',
+			input: { ...snapshot, metadata: { ...snapshot.metadata, workspaceId: 'different' } },
+			code: 'PROVIDER_METADATA_MISMATCH',
+		},
+		{
+			name: 'client reference inconsistent with metadata',
+			input: { ...snapshot, clientReferenceId: 'different' },
+			code: 'PROVIDER_REFERENCE_MISMATCH',
+		},
+		{
+			name: 'path-like ID',
+			input: { ...snapshot, id: '../payments/other' },
+			code: 'PROVIDER_INVALID_ID',
+		},
+	])('refuses $name without trusting a succeeded label', ({ input, code }) => {
+		expect(() => transitions.validate(payment, input as PaymentProviderSnapshot)).toThrow(
 			PaymentProviderError,
 		);
-		expect(() => transitions.validate(payment, input as YooKassaSnapshot)).toThrow(code as string);
+		expect(() => transitions.validate(payment, input as PaymentProviderSnapshot)).toThrow(code);
+	});
+
+	it('refuses to apply a current Stripe snapshot to an older YooKassa payment', () => {
+		expect(() => transitions.validate({ ...payment, provider: 'yookassa' }, snapshot)).toThrow(
+			'PROVIDER_MISMATCH',
+		);
 	});
 
 	it.each([

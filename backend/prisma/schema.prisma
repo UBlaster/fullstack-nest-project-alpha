@@ -204,6 +204,7 @@ model Payment {
   workspaceId            String
   userId                 String
   purpose                PaymentPurpose
+  provider               String         @default("stripe")
   amountMinor            Int
   currency               String
   status                 PaymentStatus  @default(CREATED)

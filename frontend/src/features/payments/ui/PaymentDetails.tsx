@@ -1,78 +1,71 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { ApiError } from '../../../shared/api';
-import { getPayment, getPaymentCapabilities, reconcilePayment } from '../api/payments';
+import { getPayment, getPaymentEvents, reconcilePayment } from '../api/payments';
 import {
 	canReconcilePayment,
+	canUsePaymentProvider,
 	confirmationLink,
 	mergePaymentSnapshot,
 	paymentAmount,
+	paymentProviderLabel,
 	paymentStatusLabel,
 	type Payment,
+	type PaymentCapabilities,
 } from '../model/payment';
-import { startPaymentPolling, type PaymentPollingStop } from '../model/poll-payment';
+import { paymentPollingStop } from '../model/poll-payment';
+import { startPaymentEvents } from '../model/stream-payment';
+import { usePaymentCapabilities } from '../model/use-payment-capabilities';
 import { PaymentAvailability } from './PaymentAvailability';
 
 interface Props {
 	id: string;
+	initialPayment?: Payment | null;
 	onPayment?: (payment: Payment) => void;
-	providerEnabled?: boolean | null;
+	capabilities?: PaymentCapabilities | null;
 }
 
-export function PaymentDetails({ id, onPayment, providerEnabled }: Props) {
+export function PaymentDetails(props: Props) {
+	return <PaymentDetailsContent key={props.id} {...props} />;
+}
+
+function PaymentDetailsContent({ id, initialPayment = null, onPayment, capabilities }: Props) {
 	const location = useLocation();
-	const [state, setState] = useState<{ id: string; payment: Payment | null }>({
-		id,
-		payment: null,
-	});
+	const [payment, setPayment] = useState(initialPayment);
 	const [error, setError] = useState<unknown>(null);
-	const [stopReason, setStopReason] = useState<PaymentPollingStop | null>(null);
-	const [refresh, setRefresh] = useState(0);
-	const [reconciling, setReconciling] = useState(false);
-	const reconcileController = useRef<AbortController | null>(null);
-	const [capability, setCapability] = useState<{
-		workspaceId: string;
-		enabled: boolean | null;
-		failed: boolean;
-	} | null>(null);
-	const payment = state.id === id ? state.payment : null;
-	const workspaceId = payment?.workspaceId;
-	const ownCapability = capability?.workspaceId === workspaceId ? capability : null;
-	const enabled =
-		providerEnabled !== undefined ? providerEnabled : (ownCapability?.enabled ?? null);
-	const checkoutUrl = payment && enabled === true ? confirmationLink(payment) : null;
+	const [updatesPaused, setUpdatesPaused] = useState(false);
+	const [streamRequest, setStreamRequest] = useState<{ id: string } | null>({ id });
+	const [capabilityRevision, setCapabilityRevision] = useState(0);
+	const [requesting, setRequesting] = useState<'refresh' | 'reconcile' | null>(null);
+	const cancelStream = useRef<(() => void) | null>(null);
+	const requestController = useRef<AbortController | null>(null);
+	const ownCapabilities = usePaymentCapabilities(
+		capabilities === undefined ? payment?.workspaceId : undefined,
+		capabilityRevision,
+	);
+	const activeCapabilities = capabilities === undefined ? ownCapabilities.value : capabilities;
+	const readOnly =
+		payment && activeCapabilities && payment.provider !== activeCapabilities.provider;
+	const canUseProvider = payment ? canUsePaymentProvider(payment, activeCapabilities) : false;
+	const checkoutUrl = payment ? confirmationLink(payment, activeCapabilities) : null;
+
+	const acceptPayment = useCallback((next: Payment) => {
+		setPayment((previous) => mergePaymentSnapshot(previous, next));
+	}, []);
 
 	useEffect(() => {
-		if (providerEnabled !== undefined || !workspaceId) return;
-		const controller = new AbortController();
-		void getPaymentCapabilities(workspaceId, controller.signal)
-			.then((result) => {
-				if (!controller.signal.aborted) {
-					setCapability({ workspaceId, enabled: result.enabled, failed: false });
-				}
-			})
-			.catch(() => {
-				if (!controller.signal.aborted) {
-					setCapability({ workspaceId, enabled: null, failed: true });
-				}
-			});
-		return () => controller.abort();
-	}, [providerEnabled, workspaceId, refresh]);
-
-	useEffect(() => {
-		return startPaymentPolling({
-			load: (signal) => getPayment(id, signal),
-			onPayment: (next) =>
-				setState((previous) => ({
-					id,
-					payment: mergePaymentSnapshot(previous.id === id ? previous.payment : null, next),
-				})),
+		if (!streamRequest) return;
+		const cancel = startPaymentEvents({
+			open: (signal) => getPaymentEvents(streamRequest.id, signal),
+			onPayment: acceptPayment,
 			onStop: (reason, failure) => {
-				setStopReason(reason);
+				if (reason === 'limit' || reason === 'error') setUpdatesPaused(true);
 				if (reason === 'error') setError(failure);
 			},
 		});
-	}, [id, refresh]);
+		cancelStream.current = cancel;
+		return cancel;
+	}, [streamRequest, acceptPayment]);
 
 	useEffect(() => {
 		if (payment) onPayment?.(payment);
@@ -80,10 +73,39 @@ export function PaymentDetails({ id, onPayment, providerEnabled }: Props) {
 
 	useEffect(
 		() => () => {
-			reconcileController.current?.abort();
+			requestController.current?.abort();
 		},
-		[id],
+		[],
 	);
+
+	const requestStatus = async (kind: 'refresh' | 'reconcile') => {
+		if (requestController.current || (kind === 'reconcile' && !canUseProvider)) return;
+		const controller = new AbortController();
+		requestController.current = controller;
+		cancelStream.current?.();
+		setStreamRequest(null);
+		setError(null);
+		setUpdatesPaused(false);
+		setRequesting(kind);
+		setCapabilityRevision((value) => value + 1);
+		try {
+			const next = await (kind === 'refresh' ? getPayment : reconcilePayment)(
+				id,
+				controller.signal,
+			);
+			if (controller.signal.aborted) return;
+			acceptPayment(next);
+			if (!paymentPollingStop(next)) setStreamRequest({ id });
+		} catch (failure) {
+			if (!controller.signal.aborted) {
+				setError(failure);
+				setUpdatesPaused(true);
+			}
+		} finally {
+			if (!controller.signal.aborted) setRequesting(null);
+			if (requestController.current === controller) requestController.current = null;
+		}
+	};
 
 	return (
 		<div className="payment-details" aria-live="polite">
@@ -93,13 +115,15 @@ export function PaymentDetails({ id, onPayment, providerEnabled }: Props) {
 					<h3>{paymentStatusLabel(payment)}</h3>
 					<p>{paymentAmount(payment)} · Тестовая покупка workspace</p>
 					<small className="muted">Платёж: {payment.id}</small>
+					<p className="muted">Платёжный сервис: {paymentProviderLabel(payment.provider)}</p>
+					{readOnly && <p className="muted">Этот платёж доступен только для просмотра.</p>}
 					{payment.needsReview && (
 						<p>Результат требует ручной проверки в тестовом магазине. Не повторяйте покупку.</p>
 					)}
 					{checkoutUrl && (
 						<p>
 							<a className="button-link" href={checkoutUrl} rel="noopener noreferrer">
-								Продолжить тестовую оплату в ЮKassa
+								Продолжить тестовую оплату в {paymentProviderLabel(payment.provider)}
 							</a>
 						</p>
 					)}
@@ -119,56 +143,34 @@ export function PaymentDetails({ id, onPayment, providerEnabled }: Props) {
 					Войти, чтобы узнать результат
 				</Link>
 			)}
-			{stopReason === 'limit' && (
+			{updatesPaused && (
 				<p className="muted">Автообновление приостановлено. Результат можно обновить вручную.</p>
 			)}
-			{payment && providerEnabled === undefined && (
-				<PaymentAvailability enabled={enabled} failed={ownCapability?.failed} />
+			{payment && capabilities === undefined && !readOnly && (
+				<PaymentAvailability
+					enabled={activeCapabilities?.enabled ?? null}
+					failed={ownCapabilities.failed}
+				/>
 			)}
 			<div className="payment-actions">
 				<button
 					className="button-secondary"
 					type="button"
-					disabled={reconciling}
-					onClick={() => {
-						setError(null);
-						setStopReason(null);
-						if (providerEnabled === undefined) setCapability(null);
-						setRefresh((value) => value + 1);
-					}}
+					disabled={requesting !== null}
+					onClick={() => void requestStatus('refresh')}
 				>
-					Обновить статус
+					{requesting === 'refresh' ? 'Обновляем…' : 'Обновить статус'}
 				</button>
-				{payment && canReconcilePayment(payment) && (
+				{payment && !readOnly && canReconcilePayment(payment) && (
 					<button
 						className="button-secondary"
 						type="button"
-						disabled={reconciling || enabled !== true}
-						onClick={async () => {
-							if (enabled !== true) return;
-							if (reconcileController.current && !reconcileController.current.signal.aborted)
-								return;
-							const controller = new AbortController();
-							reconcileController.current = controller;
-							setReconciling(true);
-							setError(null);
-							try {
-								const next = await reconcilePayment(id, controller.signal);
-								if (controller.signal.aborted) return;
-								setState((previous) => ({
-									id,
-									payment: mergePaymentSnapshot(previous.id === id ? previous.payment : null, next),
-								}));
-								setRefresh((value) => value + 1);
-							} catch (failure) {
-								if (!controller.signal.aborted) setError(failure);
-							} finally {
-								if (!controller.signal.aborted) setReconciling(false);
-								if (reconcileController.current === controller) reconcileController.current = null;
-							}
-						}}
+						disabled={requesting !== null || !canUseProvider}
+						onClick={() => void requestStatus('reconcile')}
 					>
-						{reconciling ? 'Сверяем…' : 'Сверить с ЮKassa'}
+						{requesting === 'reconcile'
+							? 'Сверяем…'
+							: `Сверить ${payment.provider === 'stripe' ? 'со' : 'с'} ${paymentProviderLabel(payment.provider)}`}
 					</button>
 				)}
 			</div>

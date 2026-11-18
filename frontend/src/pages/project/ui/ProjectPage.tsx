@@ -133,7 +133,7 @@ export function ProjectPage() {
 			<section className="card workspace-payment-entry">
 				<div>
 					<h2>Платежи workspace</h2>
-					<p className="muted">Тестовая покупка на 100 ₽ и история оплат рабочего пространства.</p>
+					<p className="muted">Тестовая покупка и история оплат рабочего пространства.</p>
 				</div>
 				<Link className="button-link" to={`/workspaces/${project.workspaceId}`}>
 					Открыть платежи

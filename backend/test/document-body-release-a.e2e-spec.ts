@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { ExecutionContext, INestApplication, UnauthorizedException } from '@nestjs/common';
-import { AuthGuard } from '@nestjs/passport';
 import { Test } from '@nestjs/testing';
 import { WorkspaceRole } from '@prisma/client';
 import * as request from 'supertest';
 import { AccessPolicyService } from '../src/access/access-policy.service';
 import { AuthenticatedRequest } from '../src/auth/authenticated-request';
+import { JwtAuthGuard } from '../src/auth/decorators/jwt-auth.decorator';
 import { CacheService } from '../src/cache/cache.service';
 import { DocumentsController } from '../src/documents/controllers/documents.controller';
 import { ProjectDocumentsController } from '../src/documents/controllers/project-documents.controller';
@@ -106,7 +106,7 @@ describeReleaseA('Task 7 Release A document HTTP/Prisma integration', () => {
 				{ provide: CacheService, useValue: cache },
 			],
 		})
-			.overrideGuard(AuthGuard('jwt'))
+			.overrideGuard(JwtAuthGuard)
 			.useValue({
 				// Изолируем аутентификацию; настоящий AccessPolicy проверяет членство и права в БД.
 				canActivate(context: ExecutionContext) {

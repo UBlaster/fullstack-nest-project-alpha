@@ -1,13 +1,12 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Payment, PaymentStatus, Prisma } from '@prisma/client';
 import { AccessPolicyService } from '../src/access/access-policy.service';
+import { PaymentRecoveryService } from '../src/payments/payment-recovery.service';
 import { PaymentTransitionService } from '../src/payments/payment-transition.service';
 import { PaymentsService } from '../src/payments/payments.service';
-import {
-	YooKassaPaymentProvider,
-	YooKassaSnapshot,
-} from '../src/payments/yookassa-payment.provider';
+import { PaymentProviderSnapshot } from '../src/payments/payment-provider';
+import { StripePaymentProvider } from '../src/payments/stripe-payment.provider';
 import { PrismaService } from '../src/prisma/prisma.service';
 
 const userId = 'response-test-owner';
@@ -15,11 +14,12 @@ const workspaceId = 'response-test-workspace';
 const paymentId = 'a812c5d1-20cc-4f81-829c-aad4bcb6c8e3';
 const clientKey = '604f72aa-8258-4810-a303-b3d3d756dfdf';
 const now = new Date('2026-11-16T10:00:00Z');
-const confirmationUrl = 'https://yoomoney.ru/checkout/test-payment';
+const confirmationUrl = 'https://checkout.stripe.com/c/pay/test_response';
 const responseFields = [
 	'id',
 	'workspaceId',
 	'purpose',
+	'provider',
 	'amountMinor',
 	'currency',
 	'status',
@@ -51,10 +51,11 @@ function fixture(overrides: Partial<Payment> = {}): Payment {
 		workspaceId,
 		userId,
 		purpose: 'WORKSPACE_DEMO',
-		amountMinor: 10_000,
-		currency: 'RUB',
+		provider: 'stripe',
+		amountMinor: 1_000,
+		currency: 'USD',
 		status: 'PENDING',
-		providerPaymentId: 'provider-private-id',
+		providerPaymentId: 'cs_test_private_id',
 		confirmationUrl,
 		idempotencyKey: clientKey,
 		requestHash: 'private-request-fingerprint',
@@ -75,7 +76,6 @@ function fixture(overrides: Partial<Payment> = {}): Payment {
 	};
 }
 
-// Model the Prisma selection boundary instead of returning an unrelated full-row mock.
 function project(row: Payment, select: Prisma.PaymentSelect | null | undefined): Partial<Payment> {
 	if (!select) throw new Error('An explicit Payment select is required');
 	const selected: Partial<Payment> = {};
@@ -102,14 +102,24 @@ function publicSelection(select: Prisma.PaymentSelect | null | undefined): void 
 	for (const field of responseFields) expect(select?.[field as keyof Payment]).toBe(true);
 }
 
-function publicContract(value: unknown, expected: { id: string; status: PaymentStatus }): void {
+function publicContract(
+	value: unknown,
+	expected: {
+		id: string;
+		status: PaymentStatus;
+		provider?: string;
+		amountMinor?: number;
+		currency?: string;
+	},
+): void {
 	const wire: unknown = JSON.parse(JSON.stringify(value));
 	expect(wire).toMatchObject({
 		id: expected.id,
 		workspaceId,
 		purpose: 'WORKSPACE_DEMO',
-		amountMinor: 10_000,
-		currency: 'RUB',
+		provider: expected.provider ?? 'stripe',
+		amountMinor: expected.amountMinor ?? 1_000,
+		currency: expected.currency ?? 'USD',
 		status: expected.status,
 		createdAt: now.toISOString(),
 		updatedAt: now.toISOString(),
@@ -125,12 +135,15 @@ function publicContract(value: unknown, expected: { id: string; status: PaymentS
 describe('Task 8 payment query selection and public responses (no DB/network)', () => {
 	let module: TestingModule;
 	let service: PaymentsService;
+	let recovery: PaymentRecoveryService;
 	const rows = new Map<string, Payment>();
 	const access = { requireWorkspace: jest.fn().mockResolvedValue({ id: workspaceId }) };
 	const provider = {
 		isConfigured: jest.fn().mockReturnValue(true),
 		assertConfigured: jest.fn(),
 		requestFor: jest.fn().mockReturnValue({ marker: 'private-saved-provider-body' }),
+		create: jest.fn(),
+		get: jest.fn(),
 	};
 	const find = ({ where, select }: FindArgs) => {
 		const identity = where.userId_idempotencyKey;
@@ -176,13 +189,15 @@ describe('Task 8 payment query selection and public responses (no DB/network)', 
 		module = await Test.createTestingModule({
 			providers: [
 				PaymentsService,
+				PaymentRecoveryService,
 				{ provide: PrismaService, useValue: { payment } },
 				{ provide: AccessPolicyService, useValue: access },
-				{ provide: YooKassaPaymentProvider, useValue: provider },
+				{ provide: StripePaymentProvider, useValue: provider },
 				{ provide: PaymentTransitionService, useValue: {} },
 			],
 		}).compile();
 		service = module.get(PaymentsService);
+		recovery = module.get(PaymentRecoveryService);
 	});
 	afterEach(async () => {
 		jest.restoreAllMocks();
@@ -193,7 +208,12 @@ describe('Task 8 payment query selection and public responses (no DB/network)', 
 		'reports enabled=%s only after workspace authorization',
 		async (enabled) => {
 			provider.isConfigured.mockReturnValue(enabled);
-			await expect(service.capabilities(userId, workspaceId)).resolves.toEqual({ enabled });
+			await expect(service.capabilities(userId, workspaceId)).resolves.toEqual({
+				enabled,
+				provider: 'stripe',
+				amountMinor: 1_000,
+				currency: 'USD',
+			});
 			expect(access.requireWorkspace).toHaveBeenCalledWith(userId, workspaceId, 'view', 'payment');
 			expect(access.requireWorkspace.mock.invocationCallOrder[0]).toBeLessThan(
 				provider.isConfigured.mock.invocationCallOrder[0],
@@ -203,9 +223,12 @@ describe('Task 8 payment query selection and public responses (no DB/network)', 
 		},
 	);
 
-	it.each([new ForbiddenException(), new NotFoundException()])(
-		'does not disclose payment availability when workspace access is rejected (%s)',
-		async (failure) => {
+	it.each([
+		{ label: 'member', failure: new ForbiddenException() },
+		{ label: 'outsider', failure: new NotFoundException() },
+	])(
+		'does not disclose payment availability when workspace access is rejected ($label)',
+		async ({ failure }) => {
 			access.requireWorkspace.mockRejectedValue(failure);
 			await expect(service.capabilities(userId, workspaceId)).rejects.toBe(failure);
 			expect(provider.isConfigured).not.toHaveBeenCalled();
@@ -252,15 +275,57 @@ describe('Task 8 payment query selection and public responses (no DB/network)', 
 		expect(result).toMatchObject({ confirmationUrl: null, needsReview: true });
 	});
 
+	it('keeps legacy YooKassa history readable while masking its old confirmation link', async () => {
+		rows.set(
+			paymentId,
+			fixture({
+				provider: 'yookassa',
+				amountMinor: 10_000,
+				currency: 'RUB',
+				providerPaymentId: 'legacy-yookassa-id',
+				confirmationUrl: 'https://yoomoney.ru/checkout/legacy',
+			}),
+		);
+		const current = await service.get(userId, paymentId);
+		const history = await service.history(userId, workspaceId, 20);
+		for (const result of [current, ...history]) {
+			publicContract(result, {
+				id: paymentId,
+				status: 'PENDING',
+				provider: 'yookassa',
+				amountMinor: 10_000,
+				currency: 'RUB',
+			});
+			expect(result.confirmationUrl).toBeNull();
+		}
+		expect(provider.create).not.toHaveBeenCalled();
+		expect(provider.get).not.toHaveBeenCalled();
+		expect(rows.get(paymentId)).toMatchObject({ provider: 'yookassa', status: 'PENDING' });
+	});
+
+	it('rejects legacy reconciliation with 409 before configuration, recovery or Stripe calls', async () => {
+		rows.set(paymentId, fixture({ provider: 'yookassa', amountMinor: 10_000, currency: 'RUB' }));
+		const recover = jest.spyOn(recovery, 'recover');
+		await expect(service.reconcile(userId, paymentId)).rejects.toBeInstanceOf(ConflictException);
+		await expect(service.reconcile(userId, paymentId)).rejects.toMatchObject({
+			status: 409,
+			response: { code: 'PAYMENT_PROVIDER_UNSUPPORTED' },
+		});
+		expect(provider.assertConfigured).not.toHaveBeenCalled();
+		expect(provider.create).not.toHaveBeenCalled();
+		expect(provider.get).not.toHaveBeenCalled();
+		expect(recover).not.toHaveBeenCalled();
+	});
+
 	it('returns 201 for a fresh known payment and 200 for the same key without exposing its internal identity', async () => {
 		rows.clear();
-		const recover = jest.spyOn(service, 'recover').mockImplementation(async (id) => {
+		const recover = jest.spyOn(recovery, 'recover').mockImplementation(async (id) => {
 			const row = rows.get(id);
 			if (!row) throw new Error('Missing reserved payment');
 			rows.set(id, {
 				...row,
 				status: 'PENDING',
-				providerPaymentId: 'provider-private-created',
+				providerPaymentId: 'cs_test_private_created',
 				firstDispatchedAt: now,
 			});
 		});
@@ -287,38 +352,38 @@ describe('Task 8 payment query selection and public responses (no DB/network)', 
 
 	it('returns 202 with the same safe fields while provider creation remains unresolved', async () => {
 		rows.clear();
-		jest.spyOn(service, 'recover').mockResolvedValue(undefined);
+		jest.spyOn(recovery, 'recover').mockResolvedValue(undefined);
 		const result = await service.create(userId, workspaceId, 'WORKSPACE_DEMO', clientKey);
 		expect(result.statusCode).toBe(202);
 		publicContract(result.payment, { id: result.payment.id, status: 'CREATED' });
 	});
 
-	it('returns 201 for a known waiting-for-capture operation while masking its confirmation link', async () => {
+	it('returns 201 for a known operation requiring manual review while masking its Checkout link', async () => {
 		rows.clear();
-		jest.spyOn(service, 'recover').mockImplementation(async (id) => {
+		jest.spyOn(recovery, 'recover').mockImplementation(async (id) => {
 			const row = rows.get(id);
 			if (!row) throw new Error('Missing reserved payment');
 			rows.set(id, {
 				...row,
-				status: 'CREATED',
-				providerPaymentId: 'provider-waiting',
+				status: 'PENDING',
+				providerPaymentId: 'cs_test_review',
 				needsReview: true,
-				lastErrorCode: 'PROVIDER_WAITING_FOR_CAPTURE',
+				lastErrorCode: 'PROVIDER_INVALID_RESPONSE',
 			});
 		});
 		const result = await service.create(userId, workspaceId, 'WORKSPACE_DEMO', clientKey);
 		expect(result.statusCode).toBe(201);
-		publicContract(result.payment, { id: result.payment.id, status: 'CREATED' });
+		publicContract(result.payment, { id: result.payment.id, status: 'PENDING' });
 		expect(result.payment).toMatchObject({
 			confirmationUrl: null,
 			needsReview: true,
-			lastErrorCode: 'PROVIDER_WAITING_FOR_CAPTURE',
+			lastErrorCode: 'PROVIDER_INVALID_RESPONSE',
 		});
 	});
 
 	it('keeps an unknown provider outcome at 202 even when it needs manual review', async () => {
 		rows.clear();
-		jest.spyOn(service, 'recover').mockImplementation(async (id) => {
+		jest.spyOn(recovery, 'recover').mockImplementation(async (id) => {
 			const row = rows.get(id);
 			if (!row) throw new Error('Missing reserved payment');
 			rows.set(id, { ...row, status: 'CREATED', providerPaymentId: null, needsReview: true });
@@ -330,7 +395,7 @@ describe('Task 8 payment query selection and public responses (no DB/network)', 
 	});
 
 	it('reads a fresh public projection after reconciliation instead of returning its internal work state', async () => {
-		const recover = jest.spyOn(service, 'recover').mockImplementation(async (id) => {
+		const recover = jest.spyOn(recovery, 'recover').mockImplementation(async (id) => {
 			const row = rows.get(id);
 			if (!row) throw new Error('Missing payment to reconcile');
 			rows.set(id, { ...row, status: 'SUCCEEDED' });
@@ -360,28 +425,31 @@ describe('Task 8 void transition commands (no DB/network)', () => {
 	let module: TestingModule;
 	let transitions: PaymentTransitionService;
 	const tx = {
-		payment: { findUnique: jest.fn(), updateMany: jest.fn() },
+		payment: { findUnique: jest.fn(), update: jest.fn() },
 		paymentAudit: { create: jest.fn() },
 	};
 	const transaction = jest.fn(async (work: (client: typeof tx) => Promise<unknown>) => work(tx));
-	const snapshot = (status: YooKassaSnapshot['status']): YooKassaSnapshot => ({
-		id: 'provider-private-id',
+	const snapshot = (status: PaymentProviderSnapshot['status']): PaymentProviderSnapshot => ({
+		provider: 'stripe',
+		id: 'cs_test_private_id',
 		status,
 		test: true,
-		amount: { value: '100.00', currency: 'RUB' },
-		recipient: { account_id: '123456' },
+		amountMinor: 1_000,
+		currency: 'USD',
 		metadata: { paymentId, workspaceId },
+		clientReferenceId: paymentId,
+		confirmationUrl: null,
 	});
 	beforeEach(async () => {
 		jest.clearAllMocks();
 		tx.payment.findUnique.mockReset();
-		tx.payment.updateMany.mockReset();
+		tx.payment.update.mockReset();
 		tx.paymentAudit.create.mockResolvedValue({});
 		module = await Test.createTestingModule({
 			providers: [
 				PaymentTransitionService,
 				{ provide: PrismaService, useValue: { $transaction: transaction } },
-				{ provide: YooKassaPaymentProvider, useValue: { validateShop: jest.fn() } },
+				{ provide: StripePaymentProvider, useValue: { validateContext: jest.fn() } },
 			],
 		}).compile();
 		transitions = module.get(PaymentTransitionService);
@@ -392,12 +460,15 @@ describe('Task 8 void transition commands (no DB/network)', () => {
 		tx.payment.findUnique.mockResolvedValue(
 			fixture({ status: 'CREATED', providerPaymentId: null }),
 		);
-		tx.payment.updateMany.mockResolvedValue({ count: 1 });
+		tx.payment.update.mockResolvedValue({ id: paymentId });
 		await expect(
-			transitions.apply(paymentId, snapshot('succeeded'), 'VERIFIED_WEBHOOK', 'response-test'),
+			transitions.apply(paymentId, snapshot('succeeded'), {
+				reason: 'VERIFIED_WEBHOOK',
+				correlationId: 'response-test',
+			}),
 		).resolves.toBeUndefined();
 		expect(transaction).toHaveBeenCalledTimes(1);
-		expect(tx.payment.updateMany).toHaveBeenCalledTimes(1);
+		expect(tx.payment.update).toHaveBeenCalledTimes(1);
 		expect(tx.paymentAudit.create).toHaveBeenCalledTimes(1);
 		expect(tx.paymentAudit.create).toHaveBeenCalledWith({
 			data: expect.objectContaining({ paymentId, fromStatus: 'CREATED', toStatus: 'SUCCEEDED' }),
@@ -408,16 +479,51 @@ describe('Task 8 void transition commands (no DB/network)', () => {
 		tx.payment.findUnique
 			.mockResolvedValueOnce(fixture({ status: 'CREATED', version: 1 }))
 			.mockResolvedValueOnce(fixture({ status: 'SUCCEEDED', version: 2 }));
-		tx.payment.updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
+		tx.payment.update
+			.mockRejectedValueOnce(
+				new Prisma.PrismaClientKnownRequestError('Payment version changed', {
+					code: 'P2025',
+					clientVersion: Prisma.prismaVersion.client,
+				}),
+			)
+			.mockResolvedValueOnce({ id: paymentId });
 		await expect(
-			transitions.apply(paymentId, snapshot('pending'), 'CREATE_RESPONSE', 'response-test'),
+			transitions.apply(paymentId, snapshot('pending'), {
+				reason: 'CREATE_RESPONSE',
+				correlationId: 'response-test',
+			}),
 		).resolves.toBeUndefined();
 		expect(transaction).toHaveBeenCalledTimes(2);
 		expect(tx.payment.findUnique).toHaveBeenCalledTimes(2);
-		expect(tx.payment.updateMany.mock.calls[1][0]).toMatchObject({
+		expect(tx.payment.update.mock.calls[1][0]).toMatchObject({
 			where: { id: paymentId, version: 2 },
 			data: { status: 'SUCCEEDED' },
 		});
+		expect(tx.paymentAudit.create).not.toHaveBeenCalled();
+	});
+
+	it('keeps a defensive unsupported normalized state nonterminal and requests review', async () => {
+		tx.payment.findUnique.mockResolvedValue(
+			fixture({ status: 'CREATED', providerPaymentId: null }),
+		);
+		tx.payment.update.mockResolvedValue({ id: paymentId });
+		const unexpected = {
+			...snapshot('pending'),
+			status: 'unsupported' as PaymentProviderSnapshot['status'],
+		};
+		await transitions.apply(paymentId, unexpected, {
+			reason: 'RECONCILE',
+			correlationId: 'response-test',
+		});
+		expect(tx.payment.update).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: 'CREATED',
+					needsReview: true,
+					lastErrorCode: 'PROVIDER_UNSUPPORTED_STATE',
+				}),
+			}),
+		);
 		expect(tx.paymentAudit.create).not.toHaveBeenCalled();
 	});
 });

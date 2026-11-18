@@ -41,24 +41,41 @@ function load(relative) {
 const { readPaymentAttempt, savePaymentAttempt } = load(
 	'src/features/payments/model/payment-attempt.ts',
 );
-const { paymentStatusLabel, confirmationLink, mergePaymentSnapshot, canReconcilePayment } = load(
-	'src/features/payments/model/payment.ts',
-);
+const {
+	paymentStatusLabel,
+	confirmationLink,
+	mergePaymentSnapshot,
+	canReconcilePayment,
+	paymentAmount,
+	paymentProviderLabel,
+	canUsePaymentProvider,
+	canStartAnotherPayment,
+	parsePaymentCapabilities,
+} = load('src/features/payments/model/payment.ts');
 const { startPaymentPolling } = load('src/features/payments/model/poll-payment.ts');
+const { startPaymentEvents } = load('src/features/payments/model/stream-payment.ts');
+const { ApiError } = load('src/shared/api/client.ts');
 
 const attempt = { key: 'edc971dd-97ad-477e-8dce-880781393427', paymentId: null };
 const pending = {
 	id: '624f8a5e-3089-442a-a98f-bf86bb25abe1',
 	workspaceId: 'workspace-a',
 	purpose: 'WORKSPACE_DEMO',
-	amountMinor: 10_000,
-	currency: 'RUB',
+	provider: 'stripe',
+	amountMinor: 1_000,
+	currency: 'USD',
 	status: 'PENDING',
-	confirmationUrl: 'https://yoomoney.ru/checkout/example',
+	confirmationUrl: 'https://checkout.stripe.com/c/pay/test_fixture',
 	needsReview: false,
 	lastErrorCode: null,
 	createdAt: '2026-11-15T00:00:00.000Z',
 	updatedAt: '2026-11-15T00:00:00.000Z',
+};
+const providerCapabilities = {
+	enabled: true,
+	provider: 'stripe',
+	amountMinor: 1_000,
+	currency: 'USD',
 };
 
 function memoryStorage() {
@@ -133,11 +150,66 @@ test('malformed stored attempt is rejected instead of silently replacing its key
 });
 
 test('unconfirmed/review payments and non-HTTPS URLs cannot open checkout', () => {
-	assert.equal(confirmationLink({ ...pending, status: 'CREATED' }), null);
-	assert.equal(confirmationLink({ ...pending, needsReview: true }), null);
-	assert.equal(confirmationLink({ ...pending, confirmationUrl: null }), null);
-	assert.equal(confirmationLink({ ...pending, confirmationUrl: 'javascript:alert(1)' }), null);
-	assert.equal(confirmationLink(pending), pending.confirmationUrl);
+	assert.equal(confirmationLink({ ...pending, status: 'CREATED' }, providerCapabilities), null);
+	assert.equal(confirmationLink({ ...pending, needsReview: true }, providerCapabilities), null);
+	assert.equal(confirmationLink({ ...pending, confirmationUrl: null }, providerCapabilities), null);
+	assert.equal(
+		confirmationLink({ ...pending, confirmationUrl: 'javascript:alert(1)' }, providerCapabilities),
+		null,
+	);
+	assert.equal(confirmationLink(pending, providerCapabilities), pending.confirmationUrl);
+});
+
+test('a Stripe payment can open only the configured Stripe Checkout origin', () => {
+	for (const confirmationUrl of [
+		'https://checkout.stripe.com.example.test/payment',
+		'https://checkout.stripe.com:8443/payment',
+	]) {
+		assert.equal(confirmationLink({ ...pending, confirmationUrl }, providerCapabilities), null);
+	}
+});
+
+test('price formatting uses the supplied currency for current and historical payments', () => {
+	assert.equal(paymentAmount(providerCapabilities), '$10');
+	assert.equal(paymentAmount({ amountMinor: 1_099, currency: 'USD' }), '$10.99');
+	assert.equal(
+		paymentAmount({ amountMinor: 10_000, currency: 'RUB' }).replace(/\s/g, ' '),
+		'100 ₽',
+	);
+	assert.equal(paymentProviderLabel('stripe'), 'Stripe');
+	assert.equal(paymentProviderLabel('yookassa'), 'ЮKassa');
+	assert.equal(paymentProviderLabel(undefined), 'платёжный сервис');
+});
+
+test('historical provider payment cannot open checkout or reconcile through the active provider', () => {
+	const legacy = {
+		...pending,
+		provider: 'yookassa',
+		currency: 'RUB',
+		amountMinor: 10_000,
+		confirmationUrl: 'https://yoomoney.ru/checkout/legacy',
+	};
+	assert.equal(canUsePaymentProvider(legacy, providerCapabilities), false);
+	assert.equal(confirmationLink(legacy, providerCapabilities), null);
+	assert.equal(canStartAnotherPayment(legacy, providerCapabilities), true);
+	assert.equal(legacy.status, 'PENDING');
+	assert.equal(canStartAnotherPayment(pending, providerCapabilities), false);
+	assert.equal(canUsePaymentProvider(pending, { ...providerCapabilities, enabled: false }), false);
+	assert.equal(confirmationLink(pending, { ...providerCapabilities, enabled: false }), null);
+});
+
+test('invalid provider or price metadata cannot enable a payment action', () => {
+	for (const override of [
+		{ provider: 'unknown' },
+		{ amountMinor: -1 },
+		{ amountMinor: 10.5 },
+		{ amountMinor: Number.MAX_SAFE_INTEGER + 1 },
+		{ currency: 'UNKNOWN' },
+		{ enabled: 'true' },
+	]) {
+		assert.throws(() => parsePaymentCapabilities({ ...providerCapabilities, ...override }));
+	}
+	assert.throws(() => parsePaymentCapabilities({ enabled: true }));
 });
 
 test('only confirmed backend success is labelled paid', () => {
@@ -343,10 +415,15 @@ for (const enabled of [true, false]) {
 			configurable: true,
 		});
 		globalThis.fetch = async (url) =>
-			new Response(JSON.stringify(url.endsWith('/capabilities') ? { enabled } : [pending]), {
-				status: 200,
-				headers: { 'Content-Type': 'application/json' },
-			});
+			new Response(
+				JSON.stringify(
+					url.endsWith('/capabilities') ? { ...providerCapabilities, enabled } : [pending],
+				),
+				{
+					status: 200,
+					headers: { 'Content-Type': 'application/json' },
+				},
+			);
 		try {
 			const { getPaymentCapabilities, listPayments } = load(
 				'src/features/payments/api/payments.ts',
@@ -355,7 +432,7 @@ for (const enabled of [true, false]) {
 				getPaymentCapabilities('workspace-a'),
 				listPayments('workspace-a'),
 			]);
-			assert.deepEqual(capabilities, { enabled });
+			assert.deepEqual(capabilities, { ...providerCapabilities, enabled });
 			assert.deepEqual(history, [pending]);
 		} finally {
 			globalThis.fetch = originalFetch;
@@ -388,6 +465,268 @@ test('a failed availability request does not discard successful payment history'
 		assert.equal(capabilities.status, 'rejected');
 		assert.equal(history.status, 'fulfilled');
 		assert.deepEqual(history.value, [pending]);
+	} finally {
+		globalThis.fetch = originalFetch;
+		if (originalStorage) Object.defineProperty(globalThis, 'localStorage', originalStorage);
+		else delete globalThis.localStorage;
+	}
+});
+
+const paymentFrame = (payment) => `event: payment\ndata: ${JSON.stringify(payment)}\n\n`;
+
+function eventsResponse(frames, onCancel = () => {}) {
+	const encoder = new globalThis.TextEncoder();
+	return new Response(
+		new globalThis.ReadableStream({
+			start(controller) {
+				for (const frame of frames) {
+					controller.enqueue(typeof frame === 'string' ? encoder.encode(frame) : frame);
+				}
+				controller.close();
+			},
+			cancel: onCancel,
+		}),
+		{ headers: { 'Content-Type': 'text/event-stream; charset=utf-8' } },
+	);
+}
+
+function observeEvents(open, options = {}) {
+	let count = 0;
+	const seen = [];
+	return new Promise((resolve, reject) => {
+		const timeout = setTimeout(() => reject(new Error('SSE did not finish')), 5_000);
+		startPaymentEvents({
+			retryDelayMs: 1,
+			maxDurationMs: 2_000,
+			...options,
+			open: (signal) => open(++count, signal),
+			onPayment: (payment) => seen.push(payment),
+			onStop: (reason, error) => {
+				clearTimeout(timeout);
+				resolve({ count, seen, reason, error });
+			},
+		});
+	});
+}
+
+test('SSE handles UTF-8, CRLF split across chunks, multiline data and several frames', async () => {
+	const success = { ...pending, status: 'SUCCEEDED', lastErrorCode: 'Проверено' };
+	const frame =
+		': connected\r\n\r\nevent: ignored\r\ndata: {}\r\n\r\n' +
+		`event: payment\r\ndata: {\r\ndata: ${JSON.stringify(pending).slice(1, -1)}\r\ndata: }\r\n\r\n` +
+		paymentFrame(success);
+	const bytes = new globalThis.TextEncoder().encode(frame);
+	const result = await observeEvents(async () =>
+		eventsResponse([...bytes].map((byte) => new Uint8Array([byte]))),
+	);
+	assert.deepEqual(result.seen, [pending, success]);
+	assert.equal(result.reason, 'terminal');
+	assert.equal(result.count, 1);
+});
+
+test('SSE reconnect receives a fresh snapshot after a disconnected transition', async () => {
+	const success = { ...pending, status: 'SUCCEEDED', updatedAt: '2026-11-18T10:00:00.000Z' };
+	const result = await observeEvents(async (count) =>
+		eventsResponse([paymentFrame(count === 1 ? pending : success)]),
+	);
+	assert.deepEqual(result.seen, [pending, success]);
+	assert.equal(result.reason, 'terminal');
+	assert.equal(result.count, 2);
+});
+
+test('SSE consumes coalesced frames and ignores data after a terminal snapshot', async () => {
+	const success = { ...pending, status: 'SUCCEEDED' };
+	const result = await observeEvents(async () =>
+		eventsResponse([paymentFrame(pending) + paymentFrame(success) + paymentFrame(pending)]),
+	);
+	assert.deepEqual(result.seen, [pending, success]);
+	assert.equal(result.count, 1);
+	assert.equal(result.reason, 'terminal');
+});
+
+test('SSE discards an incomplete frame before reconnect instead of splicing connections', async () => {
+	const success = { ...pending, status: 'SUCCEEDED' };
+	const result = await observeEvents(async (count) =>
+		eventsResponse([count === 1 ? paymentFrame(pending).slice(0, -1) : paymentFrame(success)]),
+	);
+	assert.deepEqual(result.seen, [success]);
+	assert.equal(result.count, 2);
+});
+
+test('SSE closes its reader immediately on needsReview', async () => {
+	let cancelled = false;
+	const review = { ...pending, needsReview: true };
+	const result = await observeEvents(async () => {
+		const encoder = new globalThis.TextEncoder();
+		return new Response(
+			new globalThis.ReadableStream({
+				start(controller) {
+					controller.enqueue(encoder.encode(paymentFrame(review)));
+				},
+				cancel() {
+					cancelled = true;
+				},
+			}),
+			{ headers: { 'Content-Type': 'text/event-stream' } },
+		);
+	});
+	assert.equal(result.reason, 'review');
+	assert.equal(result.count, 1);
+	assert.equal(cancelled, true);
+});
+
+test('SSE retries a closed stream at most twice', async () => {
+	const result = await observeEvents(async () => eventsResponse([paymentFrame(pending)]));
+	assert.equal(result.reason, 'error');
+	assert.equal(result.count, 3);
+});
+
+for (const status of [401, 403, 404]) {
+	test(`SSE never retries HTTP ${status}`, async () => {
+		const result = await observeEvents(async () => {
+			throw new ApiError('Access denied', status);
+		});
+		assert.equal(result.reason, 'error');
+		assert.equal(result.error.status, status);
+		assert.equal(result.count, 1);
+	});
+}
+
+test('SSE does not reconnect after membership is revoked during an open stream', async () => {
+	const result = await observeEvents(async () =>
+		eventsResponse([paymentFrame(pending), 'event: payment-error\ndata: {"statusCode":404}\n\n']),
+	);
+	assert.equal(result.reason, 'error');
+	assert.equal(result.error.status, 404);
+	assert.deepEqual(result.seen, [pending]);
+	assert.equal(result.count, 1);
+});
+
+test('SSE cancellation aborts the reader and prevents callbacks or reconnects', async () => {
+	let signal;
+	let cancelled = false;
+	let opened = 0;
+	let received = 0;
+	let stopped = 0;
+	let delivered;
+	const first = new Promise((resolve) => (delivered = resolve));
+	const cancel = startPaymentEvents({
+		retryDelayMs: 1,
+		open: async (nextSignal) => {
+			signal = nextSignal;
+			opened += 1;
+			return new Response(
+				new globalThis.ReadableStream({
+					start(controller) {
+						controller.enqueue(new globalThis.TextEncoder().encode(paymentFrame(pending)));
+					},
+					cancel() {
+						cancelled = true;
+					},
+				}),
+				{ headers: { 'Content-Type': 'text/event-stream' } },
+			);
+		},
+		onPayment: () => {
+			received += 1;
+			delivered();
+		},
+		onStop: () => stopped++,
+	});
+	await first;
+	cancel();
+	await new Promise((resolve) => setTimeout(resolve, 10));
+	assert.equal(signal.aborted, true);
+	assert.equal(cancelled, true);
+	assert.equal(opened, 1);
+	assert.equal(received, 1);
+	assert.equal(stopped, 0);
+});
+
+test('SSE cancellation ignores and cancels a late fetch response', async () => {
+	let resolveOpen;
+	let signal;
+	let cancelled = false;
+	let callbacks = 0;
+	const cancel = startPaymentEvents({
+		open: (nextSignal) => {
+			signal = nextSignal;
+			return new Promise((resolve) => (resolveOpen = resolve));
+		},
+		onPayment: () => callbacks++,
+		onStop: () => callbacks++,
+	});
+	cancel();
+	resolveOpen(
+		new Response(
+			new globalThis.ReadableStream({
+				cancel() {
+					cancelled = true;
+				},
+			}),
+			{ headers: { 'Content-Type': 'text/event-stream' } },
+		),
+	);
+	await Promise.resolve();
+	assert.equal(signal.aborted, true);
+	assert.equal(cancelled, true);
+	assert.equal(callbacks, 0);
+});
+
+test('SSE cancellation clears a scheduled reconnect', async () => {
+	let opened = 0;
+	let callbacks = 0;
+	const cancel = startPaymentEvents({
+		open: async () => {
+			opened += 1;
+			throw new Error('offline');
+		},
+		retryDelayMs: 5,
+		onPayment: () => callbacks++,
+		onStop: () => callbacks++,
+	});
+	await Promise.resolve();
+	cancel();
+	await new Promise((resolve) => setTimeout(resolve, 15));
+	assert.equal(opened, 1);
+	assert.equal(callbacks, 0);
+});
+
+test('SSE deadline aborts a stalled connection without an endless retry', async () => {
+	let signal;
+	const result = await observeEvents(
+		async (_count, nextSignal) => {
+			signal = nextSignal;
+			return new Promise(() => {});
+		},
+		{ maxDurationMs: 10 },
+	);
+	assert.equal(result.reason, 'limit');
+	assert.equal(result.count, 1);
+	assert.equal(signal.aborted, true);
+});
+
+test('SSE fetch carries Bearer auth in the header and no token in the URL', async () => {
+	const originalFetch = globalThis.fetch;
+	const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+	const controller = new globalThis.AbortController();
+	let request;
+	Object.defineProperty(globalThis, 'localStorage', {
+		value: { getItem: () => 'test-session' },
+		configurable: true,
+	});
+	globalThis.fetch = async (url, options) => {
+		request = { url, options };
+		return eventsResponse([paymentFrame({ ...pending, status: 'SUCCEEDED' })]);
+	};
+	try {
+		const { getPaymentEvents } = load('src/features/payments/api/payments.ts');
+		await getPaymentEvents(pending.id, controller.signal);
+		assert.equal(request.url, `http://controlled.test/payments/${pending.id}/events`);
+		assert.equal(request.options.headers.Authorization, 'Bearer test-session');
+		assert.equal(request.options.headers.Accept, 'text/event-stream');
+		assert.equal(request.options.credentials, undefined);
+		assert.equal(request.options.signal, controller.signal);
 	} finally {
 		globalThis.fetch = originalFetch;
 		if (originalStorage) Object.defineProperty(globalThis, 'localStorage', originalStorage);

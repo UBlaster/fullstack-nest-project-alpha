@@ -1,6 +1,7 @@
 export {
 	api,
 	apiWithStatus,
+	authenticatedFetch,
 	ApiError,
 	downloadAuthenticated,
 	downloadPresignedUrl,

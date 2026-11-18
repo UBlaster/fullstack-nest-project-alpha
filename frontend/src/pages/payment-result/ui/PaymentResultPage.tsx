@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { PaymentDetails, type Payment } from '../../../features/payments';
 import { Layout } from '../../../widgets/layout';
@@ -6,7 +6,6 @@ import { Layout } from '../../../widgets/layout';
 export function PaymentResultPage() {
 	const { id } = useParams();
 	const [payment, setPayment] = useState<Payment | null>(null);
-	const acceptPayment = useCallback((next: Payment) => setPayment(next), []);
 
 	return (
 		<Layout>
@@ -18,10 +17,10 @@ export function PaymentResultPage() {
 			<section className="card payment-result">
 				<h1>Результат тестовой оплаты</h1>
 				<p className="muted">
-					Статус обновляется после подтверждения ЮKassa. Если результат ещё не появился, обновите
-					его или запустите сверку.
+					Статус обновляется после подтверждения платёжного сервиса. Если результат ещё не появился,
+					обновите его или запустите сверку.
 				</p>
-				{id && <PaymentDetails key={id} id={id} onPayment={acceptPayment} />}
+				{id && <PaymentDetails key={id} id={id} onPayment={setPayment} />}
 				{payment && payment.id === id && (
 					<Link className="button-link" to={`/workspaces/${payment.workspaceId}`}>
 						История платежей workspace

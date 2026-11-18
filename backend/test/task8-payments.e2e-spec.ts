@@ -1,43 +1,40 @@
+import * as Stripe from 'stripe';
 import { randomUUID } from 'node:crypto';
 import { ExecutionContext, INestApplication, UnauthorizedException } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { AuthGuard } from '@nestjs/passport';
 import { Test } from '@nestjs/testing';
 import { Prisma, PrismaClient, WorkspaceRole } from '@prisma/client';
 import * as request from 'supertest';
 import { AuthenticatedRequest } from '../src/auth/authenticated-request';
+import { JwtAuthGuard } from '../src/auth/decorators/jwt-auth.decorator';
 import { PaymentMaintenanceService } from '../src/payments/payment-maintenance.service';
+import { PaymentRecoveryService } from '../src/payments/payment-recovery.service';
+import { PaymentWebhookService } from '../src/payments/payment-webhook.service';
 import { PaymentsModule } from '../src/payments/payments.module';
-import { PaymentsService } from '../src/payments/payments.service';
-import { YOOKASSA_API_BASE } from '../src/payments/yookassa-payment.provider';
+import { PAYMENT_EVENTS_INTERVAL_MS, PaymentsService } from '../src/payments/payments.service';
+import { STRIPE_API_BASE } from '../src/payments/stripe-payment.provider';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { createAppValidationPipe } from '../src/validation.pipe';
 import { WorkspacesModule } from '../src/workspaces/workspaces.module';
 import { isolatedConfig } from './test-config';
-import { StubPayment, YooKassaStub } from './task8-yookassa-stub';
+import { StubSession, StripeStub } from './task8-stripe-stub';
 
 const describePayments = process.env.TASK8_PAYMENTS_E2E === 'true' ? describe : describe.skip;
 
 function dedicatedDatabaseUrl(): string {
 	const value = process.env.TASK8_PAYMENTS_DATABASE_URL;
 	if (!value) throw new Error('TASK8_PAYMENTS_DATABASE_URL is required for Task 8 SQL tests');
-	let target: URL;
-	try {
-		target = new URL(value);
-	} catch {
-		throw new Error('Invalid Task 8 test database configuration');
-	}
+	const target = new URL(value);
 	if (
 		!['postgres:', 'postgresql:'].includes(target.protocol) ||
-		!['localhost', '127.0.0.1'].includes(target.hostname) ||
-		target.port !== '55437' ||
-		target.pathname !== '/task8_payments_test' ||
+		!['localhost', '127.0.0.1', 'postgres'].includes(target.hostname) ||
+		target.port !== '5432' ||
+		target.pathname !== '/task8_stripe_test' ||
 		(target.searchParams.get('schema') ?? 'public') !== 'public' ||
 		target.searchParams.getAll('schema').length > 1 ||
-		[...target.searchParams.keys()].some((key) => key !== 'schema')
-	) {
-		throw new Error('Only the dedicated local task8_payments_test database is allowed');
-	}
+		[...target.searchParams.keys()].some((key) => !['schema', 'connection_limit'].includes(key))
+	)
+		throw new Error('Only the dedicated local task8_stripe_test database is allowed');
 	return value;
 }
 
@@ -67,16 +64,18 @@ describePayments(
 		const users = [ids.owner, ids.secondOwner, ids.member, ids.viewer, ids.outsider];
 		const config = isolatedConfig({
 			PAYMENT_MODE: 'test',
-			YOOKASSA_SHOP_ID: '123456789',
-			YOOKASSA_SECRET_KEY: 'test_task8_key',
+
+			STRIPE_SECRET_KEY: 'sk_test_task8_key',
+			STRIPE_WEBHOOK_SECRET: 'whsec_task8_test',
 			PAYMENT_RETURN_BASE_URL: 'http://localhost:5173',
 			PAYMENT_HTTP_TIMEOUT_MS: 2000,
 			PAYMENT_RECONCILE_INTERVAL_MS: 60_000,
 		});
-		const stub = new YooKassaStub();
+		const stub = new StripeStub();
 		let prisma: PrismaClient;
 		let app: INestApplication;
-		let service: PaymentsService;
+		let recovery: PaymentRecoveryService;
+		let webhooks: PaymentWebhookService;
 		let databaseVerified = false;
 		let pendingRelease: (() => void) | undefined;
 		const auth = (id = ids.owner) => ({ 'x-task8-user-id': id });
@@ -95,10 +94,33 @@ describePayments(
 			return response.body as PublicPayment;
 		};
 		const stored = (id: string) => prisma.payment.findUniqueOrThrow({ where: { id } });
-		const webhook = (id: string, event = 'payment.succeeded') =>
+		const signedWebhook = (payload: string, signature?: string) =>
 			request(app.getHttpServer())
-				.post('/payments/webhooks/yookassa')
-				.send({ type: 'notification', event, object: { id, status: 'succeeded' } });
+				.post('/payments/webhooks/stripe')
+				.set('Content-Type', 'application/json')
+				.set(
+					'Stripe-Signature',
+					signature ??
+						Stripe.webhooks.generateTestHeaderString({ payload, secret: 'whsec_task8_test' }),
+				)
+				.send(payload);
+		const webhookPayload = (id: string, event = 'checkout.session.completed') =>
+			JSON.stringify({
+				id: 'evt_' + randomUUID().replace(/-/g, ''),
+				object: 'event',
+				livemode: false,
+				type: event,
+				data: { object: { id, object: 'checkout.session' } },
+			});
+		const webhook = (id: string, event = 'checkout.session.completed') =>
+			signedWebhook(webhookPayload(id, event));
+		const eventKey = (providerObjectId: string) => ({
+			provider_eventType_providerObjectId: {
+				provider: 'stripe',
+				eventType: 'checkout.session.completed',
+				providerObjectId,
+			},
+		});
 		const reconcile = (id: string, user = ids.owner) =>
 			request(app.getHttpServer()).post(`/payments/${id}/reconcile`).set(auth(user));
 		const providerId = async (localId: string) => {
@@ -118,7 +140,7 @@ describePayments(
 			const [target] = await prisma.$queryRaw<Array<{ database: string }>>`
 			SELECT current_database() AS database
 		`;
-			if (target.database !== 'task8_payments_test') throw new Error('Unexpected physical test DB');
+			if (target.database !== 'task8_stripe_test') throw new Error('Unexpected physical test DB');
 			databaseVerified = true;
 			await prisma.user.createMany({
 				data: users.map((id) => ({
@@ -152,9 +174,9 @@ describePayments(
 				.useValue(config)
 				.overrideProvider(PrismaService)
 				.useValue(prisma)
-				.overrideProvider(YOOKASSA_API_BASE)
+				.overrideProvider(STRIPE_API_BASE)
 				.useValue(stub.baseUrl)
-				.overrideGuard(AuthGuard('jwt'))
+				.overrideGuard(JwtAuthGuard)
 				.useValue({
 					canActivate(context: ExecutionContext) {
 						const req = context.switchToHttp().getRequest<AuthenticatedRequest>();
@@ -166,13 +188,14 @@ describePayments(
 					},
 				})
 				.compile();
-			app = module.createNestApplication({ logger: false });
+			app = module.createNestApplication({ logger: false, rawBody: true });
 			app.useGlobalPipes(createAppValidationPipe());
 			await app.init();
-			service = module.get(PaymentsService);
+			recovery = module.get(PaymentRecoveryService);
+			webhooks = module.get(PaymentWebhookService);
 		});
 		const maintenance = () =>
-			new PaymentMaintenanceService(service, prisma as PrismaService, config);
+			new PaymentMaintenanceService(recovery, webhooks, prisma as PrismaService, config);
 		const insertLocal = async (base: Awaited<ReturnType<typeof stored>>, id: string) => {
 			const body = base.providerRequest as Prisma.InputJsonObject;
 			return prisma.payment.create({
@@ -181,12 +204,17 @@ describePayments(
 					workspaceId: ids.workspace,
 					userId: ids.owner,
 					purpose: 'WORKSPACE_DEMO',
-					amountMinor: 10_000,
-					currency: 'RUB',
+					amountMinor: 1000,
+					currency: 'USD',
 					idempotencyKey: randomUUID(),
 					requestHash: base.requestHash,
 					providerIdempotenceKey: randomUUID(),
-					providerRequest: { ...body, metadata: { paymentId: id, workspaceId: ids.workspace } },
+					provider: 'stripe',
+					providerRequest: {
+						...body,
+						client_reference_id: id,
+						metadata: { paymentId: id, workspaceId: ids.workspace },
+					},
 				},
 			});
 		};
@@ -221,6 +249,41 @@ describePayments(
 			await prisma?.$disconnect();
 		});
 
+		it('rejects a bad signature before fetching Stripe or recording an event', async () => {
+			const gets = stub.gets.length;
+			const events = await prisma.paymentEvent.count();
+			await signedWebhook(webhookPayload('cs_test_unsigned'), 't=1,v1=invalid').expect(400);
+			expect(stub.gets).toHaveLength(gets);
+			expect(await prisma.paymentEvent.count()).toBe(events);
+		});
+
+		it('ignores an unrelated signed event without a provider lookup', async () => {
+			const gets = stub.gets.length;
+			await signedWebhook(webhookPayload('cs_test_unrelated', 'customer.created')).expect(200);
+			expect(stub.gets).toHaveLength(gets);
+		});
+
+		it('keeps legacy YooKassa records read-only and excludes them from Stripe recovery', async () => {
+			const legacy = await create();
+			await prisma.payment.update({
+				where: { id: legacy.id },
+				data: { provider: 'yookassa', confirmationUrl: 'https://yoomoney.ru/legacy-checkout' },
+			});
+			const gets = stub.gets.length;
+			const creates = stub.creates.length;
+			const result = await request(app.getHttpServer())
+				.get('/payments/' + legacy.id)
+				.set(auth())
+				.expect(200);
+			expect(result.body).toMatchObject({ provider: 'yookassa', confirmationUrl: null });
+			await reconcile(legacy.id).expect(409);
+			await recovery.recover(legacy.id);
+			await makeDue(legacy.id);
+			await maintenance().runOnce();
+			expect(stub.gets).toHaveLength(gets);
+			expect(stub.creates).toHaveLength(creates);
+		});
+
 		it('20 concurrent requests reserve one row and send one create; replay returns the same payment', async () => {
 			const key = randomUUID();
 			const before = stub.creates.length;
@@ -247,8 +310,8 @@ describePayments(
 			expect(replay.body).toMatchObject({
 				id,
 				status: 'PENDING',
-				amountMinor: 10_000,
-				currency: 'RUB',
+				amountMinor: 1000,
+				currency: 'USD',
 			});
 			expect(stub.creates.length - before).toBe(1);
 			for (const privateField of [
@@ -277,7 +340,7 @@ describePayments(
 			pendingRelease = held.release;
 			const creating = post().then((response) => response);
 			const { payment } = await held.ready;
-			stub.change(payment.id, { status: 'succeeded', paid: true });
+			stub.change(payment.id, { status: 'complete', payment_status: 'paid' });
 			await webhook(payment.id).expect(200);
 			expect(await stored(payment.metadata.paymentId)).toMatchObject({
 				status: 'SUCCEEDED',
@@ -288,7 +351,7 @@ describePayments(
 			expect(response.status).toBe(201);
 			expect(response.body).toMatchObject({ id: payment.metadata.paymentId, status: 'SUCCEEDED' });
 			await webhook(payment.id).expect(200);
-			await webhook(payment.id, 'payment.canceled').expect(200);
+			await webhook(payment.id, 'checkout.session.expired').expect(200);
 			expect(
 				await prisma.paymentAudit.count({
 					where: { paymentId: payment.metadata.paymentId, toStatus: 'SUCCEEDED' },
@@ -296,12 +359,28 @@ describePayments(
 			).toBe(1);
 		});
 
+		it('keeps completed-but-unpaid pending without reopening an obsolete checkout link', async () => {
+			const local = await create();
+			const external = await providerId(local.id);
+			stub.change(external, { status: 'complete', payment_status: 'unpaid', url: null });
+			await webhook(external).expect(200);
+			expect(await stored(local.id)).toMatchObject({ status: 'PENDING', confirmationUrl: null });
+			const response = await request(app.getHttpServer())
+				.get(`/payments/${local.id}`)
+				.set(auth())
+				.expect(200);
+			expect(response.body).toMatchObject({ status: 'PENDING', confirmationUrl: null });
+			stub.change(external, { status: 'complete', payment_status: 'paid' });
+			await webhook(external).expect(200);
+			expect((await stored(local.id)).status).toBe('SUCCEEDED');
+		});
+
 		it('rechecks the same event after a nonterminal snapshot instead of poisoning deduplication', async () => {
 			const local = await create();
 			const external = await providerId(local.id);
 			await webhook(external).expect(200);
 			expect(await stored(local.id)).toMatchObject({ status: 'PENDING' });
-			stub.change(external, { status: 'succeeded', paid: true });
+			stub.change(external, { status: 'complete', payment_status: 'paid' });
 			await webhook(external).expect(200);
 			await webhook(external).expect(200);
 			expect(await stored(local.id)).toMatchObject({ status: 'SUCCEEDED' });
@@ -313,14 +392,14 @@ describePayments(
 		it('uses the current canceled snapshot rather than an untrusted succeeded event label', async () => {
 			const local = await create();
 			const external = await providerId(local.id);
-			stub.change(external, { status: 'canceled' });
+			stub.change(external, { status: 'expired', payment_status: 'unpaid' });
 			await webhook(external).expect(200);
-			await webhook(external, 'payment.canceled').expect(200);
+			await webhook(external, 'checkout.session.expired').expect(200);
 			expect((await stored(local.id)).status).toBe('CANCELLED');
 			expect(
 				await prisma.paymentAudit.count({ where: { paymentId: local.id, toStatus: 'CANCELLED' } }),
 			).toBe(1);
-			stub.change(external, { status: 'succeeded', paid: true });
+			stub.change(external, { status: 'complete', payment_status: 'paid' });
 			await webhook(external).expect(200);
 			expect(await stored(local.id)).toMatchObject({
 				status: 'CANCELLED',
@@ -338,8 +417,8 @@ describePayments(
 			const firstExternal = await providerId(first.id);
 			const secondExternal = await providerId(second.id);
 			stub.change(secondExternal, {
-				status: 'succeeded',
-				paid: true,
+				status: 'complete',
+				payment_status: 'paid',
 				metadata: { paymentId: first.id, workspaceId: ids.workspace },
 			});
 			await webhook(secondExternal).expect(200);
@@ -357,14 +436,13 @@ describePayments(
 			const local = await create();
 			const external = await providerId(local.id);
 			await webhook(external).expect(200);
-			stub.change(external, { status: 'succeeded', paid: true });
-			// Exclude ordinary Payment recovery so this proves durable event recovery specifically.
+			stub.change(external, { status: 'complete', payment_status: 'paid' });
 			await prisma.payment.update({
 				where: { id: local.id },
 				data: { nextReconcileAt: new Date(Date.now() + 86_400_000) },
 			});
-			await prisma.paymentEvent.updateMany({
-				where: { providerObjectId: external },
+			await prisma.paymentEvent.update({
+				where: eventKey(external),
 				data: { nextReconcileAt: new Date(0) },
 			});
 			await maintenance().runOnce();
@@ -378,31 +456,31 @@ describePayments(
 		});
 
 		it.each([
-			['live mode', (snapshot: StubPayment) => ({ ...snapshot, test: false })],
+			['live mode', (snapshot: StubSession) => ({ ...snapshot, livemode: true })],
 			[
-				'foreign shop',
-				(snapshot: StubPayment) => ({
+				'client reference',
+				(snapshot: StubSession) => ({
 					...snapshot,
-					recipient: { ...snapshot.recipient, account_id: 'foreign-shop' },
+					client_reference_id: randomUUID(),
 				}),
 			],
 			[
 				'amount',
-				(snapshot: StubPayment) => ({
+				(snapshot: StubSession) => ({
 					...snapshot,
-					amount: { ...snapshot.amount, value: '99.99' },
+					amount_total: 999,
 				}),
 			],
 			[
 				'currency',
-				(snapshot: StubPayment) => ({
+				(snapshot: StubSession) => ({
 					...snapshot,
-					amount: { ...snapshot.amount, currency: 'USD' },
+					currency: 'eur',
 				}),
 			],
 			[
 				'workspace metadata',
-				(snapshot: StubPayment) => ({
+				(snapshot: StubSession) => ({
 					...snapshot,
 					metadata: { ...snapshot.metadata, workspaceId: ids.otherWorkspace },
 				}),
@@ -410,7 +488,7 @@ describePayments(
 		])('does not accept a terminal snapshot with invalid %s', async (_name, transform) => {
 			const local = await create();
 			const external = await providerId(local.id);
-			stub.change(external, { status: 'succeeded', paid: true });
+			stub.change(external, { status: 'complete', payment_status: 'paid' });
 			stub.transformNextResponse(transform);
 			await webhook(external).expect(200);
 			expect((await stored(local.id)).status).toBe('PENDING');
@@ -422,7 +500,7 @@ describePayments(
 		it('returns 503 for a transient verification failure, then handles a provider retry', async () => {
 			const local = await create();
 			const external = await providerId(local.id);
-			stub.change(external, { status: 'succeeded', paid: true });
+			stub.change(external, { status: 'complete', payment_status: 'paid' });
 			stub.failNextGet();
 			await webhook(external).expect(503);
 			expect((await stored(local.id)).status).toBe('PENDING');
@@ -430,16 +508,68 @@ describePayments(
 			expect((await stored(local.id)).status).toBe('SUCCEEDED');
 		});
 
+		it('returns 503 when it cannot persist the webhook retry', async () => {
+			const local = await create();
+			const external = await providerId(local.id);
+			stub.change(external, { status: 'complete', payment_status: 'paid' });
+			stub.failNextGet();
+			const eventWrite = jest
+				.spyOn(prisma, '$queryRaw')
+				.mockRejectedValueOnce(new Error('Event storage unavailable'));
+			try {
+				const response = await webhook(external).expect(503);
+				expect(response.body.code).toBe('PAYMENT_VERIFICATION_UNAVAILABLE');
+				expect((await stored(local.id)).status).toBe('PENDING');
+				expect(await prisma.paymentEvent.findUnique({ where: eventKey(external) })).toBeNull();
+			} finally {
+				eventWrite.mockRestore();
+			}
+			await webhook(external).expect(200);
+			expect((await stored(local.id)).status).toBe('SUCCEEDED');
+		});
+
+		it('does not reclaim a webhook event that was rescheduled after its batch was selected', async () => {
+			const local = await create();
+			const external = await providerId(local.id);
+			await webhook(external).expect(200);
+			const event = await prisma.paymentEvent.update({
+				where: eventKey(external),
+				data: { nextReconcileAt: new Date(Date.now() + 60_000) },
+			});
+			const staleBatch = prisma.paymentEvent.findMany({ where: { id: event.id } });
+			const select = jest.spyOn(prisma.paymentEvent, 'findMany').mockReturnValueOnce(staleBatch);
+			const gets = stub.gets.filter((id) => id === external).length;
+			try {
+				await maintenance().runOnce();
+				expect(stub.gets.filter((id) => id === external)).toHaveLength(gets);
+				expect(await prisma.paymentEvent.findUnique({ where: { id: event.id } })).toEqual(event);
+			} finally {
+				select.mockRestore();
+			}
+		});
+
+		it('returns 503 for checkout replay while keeping the payment visible in history', async () => {
+			const key = randomUUID();
+			const local = await create(key);
+			const creates = stub.creates.length;
+			jest.mocked(config.get).mockReturnValueOnce(undefined);
+			const response = await post(key).expect(503);
+			expect(response.body.code).toBe('PAYMENT_NOT_CONFIGURED');
+			expect(stub.creates).toHaveLength(creates);
+			await request(app.getHttpServer()).get(`/payments/${local.id}`).set(auth()).expect(200);
+		});
+
 		it('durably records UNMATCHED and can apply its later delivery after the local record becomes available', async () => {
 			const base = await stored((await create()).id);
 			const id = randomUUID();
-			const external = randomUUID();
+			const external = 'cs_test_' + randomUUID().replace(/-/g, '');
 			const template = stub.payments.get(base.providerPaymentId!)!;
 			stub.add({
 				...template,
 				id: external,
-				status: 'succeeded',
-				paid: true,
+				status: 'complete',
+				payment_status: 'paid',
+				client_reference_id: id,
 				metadata: { paymentId: id, workspaceId: ids.workspace },
 			});
 			await webhook(external).expect(200);
@@ -457,19 +587,20 @@ describePayments(
 		it('maintenance can retry UNMATCHED once its local record becomes available', async () => {
 			const base = await stored((await create()).id);
 			const id = randomUUID();
-			const external = randomUUID();
+			const external = 'cs_test_' + randomUUID().replace(/-/g, '');
 			const template = stub.payments.get(base.providerPaymentId!)!;
 			stub.add({
 				...template,
 				id: external,
-				status: 'succeeded',
-				paid: true,
+				status: 'complete',
+				payment_status: 'paid',
+				client_reference_id: id,
 				metadata: { paymentId: id, workspaceId: ids.workspace },
 			});
 			await webhook(external).expect(200);
 			await insertLocal(base, id);
-			await prisma.paymentEvent.updateMany({
-				where: { providerObjectId: external },
+			await prisma.paymentEvent.update({
+				where: eventKey(external),
 				data: { nextReconcileAt: new Date(0) },
 			});
 			await maintenance().runOnce();
@@ -538,7 +669,7 @@ describePayments(
 				needsReview: true,
 				providerPaymentId: null,
 			});
-			stub.change(external.id, { status: 'succeeded', paid: true });
+			stub.change(external.id, { status: 'complete', payment_status: 'paid' });
 			await webhook(external.id).expect(200);
 			expect(await stored(local.id)).toMatchObject({
 				status: 'SUCCEEDED',
@@ -554,7 +685,7 @@ describePayments(
 				where: { id: local.id },
 				data: { firstDispatchedAt: new Date(Date.now() - 48 * 60 * 60 * 1000) },
 			});
-			stub.change(external, { status: 'succeeded', paid: true });
+			stub.change(external, { status: 'complete', payment_status: 'paid' });
 			const creates = stub.creates.length;
 			await reconcile(local.id).expect(200);
 			expect(stub.creates).toHaveLength(creates);
@@ -584,10 +715,10 @@ describePayments(
 			expect(stub.payments.has(external.id)).toBe(true);
 		});
 
-		it('treats waiting_for_capture as manual review and never confirms or captures automatically', async () => {
+		it('marks an inconsistent expired-but-paid session for review instead of inventing a terminal state', async () => {
 			const local = await create();
 			const external = await providerId(local.id);
-			stub.change(external, { status: 'waiting_for_capture' });
+			stub.change(external, { status: 'expired', payment_status: 'paid' });
 			await reconcile(local.id).expect(200);
 			expect(await stored(local.id)).toMatchObject({ status: 'PENDING', needsReview: true });
 		});
@@ -601,6 +732,10 @@ describePayments(
 					.set(auth(user))
 					.expect(403);
 				await request(app.getHttpServer()).get(`/payments/${local.id}`).set(auth(user)).expect(403);
+				await request(app.getHttpServer())
+					.get(`/payments/${local.id}/events`)
+					.set(auth(user))
+					.expect(403);
 				await reconcile(local.id, user).expect(403);
 			}
 			await post(randomUUID(), ids.outsider).expect(404);
@@ -609,6 +744,11 @@ describePayments(
 				.set(auth(ids.outsider))
 				.expect(404);
 			await reconcile(local.id, ids.outsider).expect(404);
+			await request(app.getHttpServer())
+				.get(`/payments/${local.id}/events`)
+				.set(auth(ids.outsider))
+				.expect(404);
+			await request(app.getHttpServer()).get(`/payments/${local.id}/events`).expect(401);
 			await request(app.getHttpServer()).get(`/payments/${local.id}`).expect(401);
 			const history = await request(app.getHttpServer())
 				.get(`/workspaces/${ids.workspace}/payments?limit=2`)
@@ -619,6 +759,124 @@ describePayments(
 				.get(`/workspaces/${ids.workspace}/payments?limit=101`)
 				.set(auth())
 				.expect(400);
+		});
+
+		it('streams committed changes from another SQL client and reconnects with the current snapshot', async () => {
+			const local = await create();
+			const writer = new PrismaClient({ datasources: { db: { url: dedicatedDatabaseUrl() } } });
+			let releaseInitial: () => void = () => {};
+			const initial = new Promise<void>((resolve) => (releaseInitial = resolve));
+			const stream = request(app.getHttpServer())
+				.get(`/payments/${local.id}/events`)
+				.set(auth())
+				.buffer(true)
+				.parse((response, done) => {
+					let text = '';
+					response.setEncoding('utf8');
+					response.on('data', (chunk: string) => {
+						text += chunk;
+						if (text.includes('"status":"PENDING"')) releaseInitial();
+					});
+					response.on('end', () => done(null, text));
+					response.on('error', done);
+				});
+			const result = stream.then((response) => response);
+			let timeout: ReturnType<typeof setTimeout> | undefined;
+			try {
+				await Promise.race([
+					initial,
+					new Promise<never>((_resolve, reject) => {
+						timeout = setTimeout(() => reject(new Error('Initial SSE snapshot missing')), 5_000);
+					}),
+				]);
+				await writer.payment.update({
+					where: { id: local.id },
+					data: { status: 'SUCCEEDED', confirmationUrl: null },
+				});
+				const response = await result;
+				expect(response.status).toBe(200);
+				expect(response.headers['content-type']).toContain('text/event-stream');
+				const parseEvents = (text: string): PublicPayment[] =>
+					text
+						.split('\n\n')
+						.filter((frame) => frame.includes('event: payment\n'))
+						.map(
+							(frame) =>
+								JSON.parse(
+									frame
+										.split('\n')
+										.find((line) => line.startsWith('data: '))!
+										.slice(6),
+								) as PublicPayment,
+						);
+				const events = parseEvents(response.body as string);
+				expect(events.map((event) => event.status)).toEqual(['PENDING', 'SUCCEEDED']);
+				const current = await request(app.getHttpServer())
+					.get(`/payments/${local.id}`)
+					.set(auth())
+					.expect(200);
+				expect(events[1]).toEqual(current.body);
+				const reconnected = await request(app.getHttpServer())
+					.get(`/payments/${local.id}/events`)
+					.set(auth())
+					.buffer(true)
+					.parse((response, done) => {
+						let text = '';
+						response.setEncoding('utf8');
+						response.on('data', (chunk: string) => (text += chunk));
+						response.on('end', () => done(null, text));
+						response.on('error', done);
+					})
+					.expect(200);
+				expect(parseEvents(reconnected.body as string)).toEqual([current.body]);
+			} finally {
+				clearTimeout(timeout);
+				stream.abort();
+				await result.catch(() => {});
+				await writer.$disconnect();
+			}
+		});
+
+		it('stops SQL observation when the HTTP SSE client disconnects', async () => {
+			const local = await create();
+			const get = jest.spyOn(app.get(PaymentsService), 'get');
+			let releaseInitial: () => void = () => {};
+			const initial = new Promise<void>((resolve) => (releaseInitial = resolve));
+			const stream = request(app.getHttpServer())
+				.get(`/payments/${local.id}/events`)
+				.set(auth())
+				.buffer(true)
+				.parse((response, done) => {
+					let text = '';
+					response.setEncoding('utf8');
+					response.on('data', (chunk: string) => {
+						text += chunk;
+						if (text.includes('event: payment\n')) releaseInitial();
+					});
+					response.on('end', () => done(null, text));
+				});
+			const result = stream.then(
+				() => {},
+				() => {},
+			);
+			let timeout: ReturnType<typeof setTimeout> | undefined;
+			try {
+				await Promise.race([
+					initial,
+					new Promise<never>((_resolve, reject) => {
+						timeout = setTimeout(() => reject(new Error('Initial SSE snapshot missing')), 5_000);
+					}),
+				]);
+				stream.abort();
+				await result;
+				await new Promise((resolve) => setTimeout(resolve, PAYMENT_EVENTS_INTERVAL_MS + 100));
+				expect(get.mock.calls.filter(([, id]) => id === local.id)).toHaveLength(1);
+			} finally {
+				clearTimeout(timeout);
+				stream.abort();
+				await result;
+				get.mockRestore();
+			}
 		});
 
 		it('preserves payment history on workspace deletion and keeps ordinary workspace CRUD working', async () => {
@@ -678,8 +936,13 @@ describePayments(
 				.set('Idempotency-Key', randomUUID())
 				.send({ purpose: 'WORKSPACE_DEMO', amountMinor: 1 })
 				.expect(201);
-			expect(response.body).toMatchObject({ amountMinor: 10_000, currency: 'RUB' });
-			expect(stub.creates.at(-1)!.body.amount).toEqual({ value: '100.00', currency: 'RUB' });
+			expect(response.body).toMatchObject({ amountMinor: 1000, currency: 'USD' });
+			expect(stub.creates.at(-1)!.body.line_items).toEqual([
+				expect.objectContaining({
+					quantity: 1,
+					price_data: expect.objectContaining({ unit_amount: 1000, currency: 'usd' }),
+				}),
+			]);
 		});
 
 		it('two maintenance instances cannot concurrently own the same payment claim', async () => {
@@ -737,18 +1000,18 @@ describePayments(
 			const external = await providerId(local.id);
 			await webhook(external).expect(200);
 			const event = await prisma.paymentEvent.findFirstOrThrow({
-				where: { providerObjectId: external, eventType: 'payment.succeeded' },
+				where: { providerObjectId: external, eventType: 'checkout.session.completed' },
 			});
 			const oldLease = randomUUID();
 			await prisma.paymentEvent.update({
 				where: { id: event.id },
 				data: { leaseToken: oldLease, leaseUntil: new Date(Date.now() + 60_000) },
 			});
-			stub.change(external, { status: 'succeeded', paid: true });
+			stub.change(external, { status: 'complete', payment_status: 'paid' });
 			const held = stub.holdNextGet();
 			pendingRelease = held.release;
 			const handling = expect(
-				service.webhook('payment.succeeded', external, oldLease),
+				webhooks.recoverEvent({ ...event, leaseToken: oldLease }),
 			).rejects.toMatchObject({ code: 'PAYMENT_EVENT_LEASE_LOST' });
 			await held.ready;
 			const currentEvent = await prisma.paymentEvent.update({
@@ -781,13 +1044,13 @@ describePayments(
 				where: { userId_workspaceId: { userId: ids.owner, workspaceId: ids.workspace } },
 				data: { role: 'MEMBER' },
 			});
-			const maintenance = new PaymentMaintenanceService(service, prisma as PrismaService, config);
+			const runner = maintenance();
 			const held = stub.holdNextCreate();
 			pendingRelease = held.release;
-			const running = maintenance.runOnce();
+			const running = runner.runOnce();
 			await held.ready;
 			let closed = false;
-			const stopping = maintenance.stop().then(() => {
+			const stopping = runner.stop().then(() => {
 				closed = true;
 			});
 			await new Promise((resolve) => setImmediate(resolve));

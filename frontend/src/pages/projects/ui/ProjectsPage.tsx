@@ -45,7 +45,7 @@ export function ProjectsPage() {
 						<article className="card workspace-card" key={workspace.id}>
 							<h3>{workspace.name}</h3>
 							<p className="muted">
-								Демонстрационная покупка — 100 ₽. Доступна владельцу workspace.
+								Демонстрационная покупка и история оплат. Доступны владельцу workspace.
 							</p>
 							<Link className="button-link" to={`/workspaces/${workspace.id}`}>
 								Тестовые платежи

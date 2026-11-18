@@ -2,10 +2,17 @@ import {
 	CanActivate,
 	ExecutionContext,
 	HttpException,
+	HttpStatus,
 	Injectable,
 	PayloadTooLargeException,
+	RawBodyRequest,
 } from '@nestjs/common';
 import { Request } from 'express';
+
+const WINDOW_MS = 60_000;
+const MAX_REQUESTS_PER_WINDOW = 600;
+const MAX_REQUESTS_PER_IP = 120;
+const MAX_BODY_BYTES = 65_536;
 
 @Injectable()
 export class PaymentWebhookRateGuard implements CanActivate {
@@ -14,19 +21,21 @@ export class PaymentWebhookRateGuard implements CanActivate {
 	private readonly clients = new Map<string, number>();
 
 	canActivate(context: ExecutionContext): boolean {
-		const req = context.switchToHttp().getRequest<Request>();
-		if (Date.now() - this.windowStart >= 60_000) {
-			this.windowStart = Date.now();
+		const req = context.switchToHttp().getRequest<RawBodyRequest<Request>>();
+		const now = Date.now();
+		if (now - this.windowStart >= WINDOW_MS) {
+			this.windowStart = now;
 			this.requests = 0;
 			this.clients.clear();
 		}
-		// req.socket is independent of an untrusted X-Forwarded-For header.
 		const ip = req.socket.remoteAddress ?? 'unknown';
-		const count = (this.clients.get(ip) ?? 0) + 1;
-		if (++this.requests > 600 || count > 120) throw new HttpException('Webhook rate limit', 429);
-		this.clients.set(ip, count);
-		if (Buffer.byteLength(JSON.stringify(req.body ?? null), 'utf8') > 16_384)
-			throw new PayloadTooLargeException();
+		const clientRequests = (this.clients.get(ip) ?? 0) + 1;
+		this.requests += 1;
+		if (this.requests > MAX_REQUESTS_PER_WINDOW || clientRequests > MAX_REQUESTS_PER_IP) {
+			throw new HttpException('Webhook rate limit', HttpStatus.TOO_MANY_REQUESTS);
+		}
+		this.clients.set(ip, clientRequests);
+		if ((req.rawBody?.byteLength ?? 0) > MAX_BODY_BYTES) throw new PayloadTooLargeException();
 		return true;
 	}
 }

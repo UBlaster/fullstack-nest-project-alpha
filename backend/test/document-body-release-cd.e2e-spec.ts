@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { ExecutionContext, INestApplication, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AuthGuard } from '@nestjs/passport';
 import { Test } from '@nestjs/testing';
 import { PrismaClient, WorkspaceRole } from '@prisma/client';
 import * as request from 'supertest';
 import { AccessPolicyService } from '../src/access/access-policy.service';
 import { AuthenticatedRequest } from '../src/auth/authenticated-request';
+import { JwtAuthGuard } from '../src/auth/decorators/jwt-auth.decorator';
 import { CacheService } from '../src/cache/cache.service';
 import { DocumentFilesController } from '../src/document-files/controllers/document-files.controller';
 import { DocumentFilesService } from '../src/document-files/document-files.service';
@@ -240,7 +240,7 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 				{ provide: STORAGE_CONFIG, useValue: storageConfig },
 			],
 		})
-			.overrideGuard(AuthGuard('jwt'))
+			.overrideGuard(JwtAuthGuard)
 			.useValue({
 				canActivate(context: ExecutionContext) {
 					const incoming = context.switchToHttp().getRequest<AuthenticatedRequest>();

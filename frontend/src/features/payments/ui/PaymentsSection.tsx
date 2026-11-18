@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError } from '../../../shared/api';
-import { createPayment, getPaymentCapabilities, listPayments } from '../api/payments';
+import { createPayment, listPayments } from '../api/payments';
 import {
+	PAYMENT_HISTORY_LIMIT,
+	canStartAnotherPayment,
 	confirmationLink,
-	isTerminalPayment,
 	mergePaymentSnapshot,
 	paymentAmount,
+	paymentProviderLabel,
 	paymentStatusLabel,
 	type Payment,
 } from '../model/payment';
@@ -15,12 +17,26 @@ import {
 	savePaymentAttempt,
 	type PaymentAttempt,
 } from '../model/payment-attempt';
+import { usePaymentCapabilities } from '../model/use-payment-capabilities';
 import { PaymentDetails } from './PaymentDetails';
 import { PaymentAvailability } from './PaymentAvailability';
 
 interface Props {
 	workspaceId: string;
 	userId: string;
+}
+
+interface PaymentHistory {
+	rows: Payment[] | null;
+	loading: boolean;
+	error: string;
+}
+
+function historyErrorMessage(failure: unknown): string {
+	if (failure instanceof ApiError && failure.status === 403) {
+		return 'Платежи доступны только владельцу workspace.';
+	}
+	return failure instanceof Error ? failure.message : 'Не удалось загрузить историю платежей';
 }
 
 export function PaymentsSection({ workspaceId, userId }: Props) {
@@ -36,53 +52,30 @@ export function PaymentsSection({ workspaceId, userId }: Props) {
 	});
 	const [attempt, setAttempt] = useState<PaymentAttempt | null>(initialAttempt.attempt);
 	const [current, setCurrent] = useState<Payment | null>(null);
-	const [history, setHistory] = useState<Payment[]>([]);
-	const [historyError, setHistoryError] = useState('');
+	const [history, setHistory] = useState<PaymentHistory>({ rows: null, loading: true, error: '' });
 	const [error, setError] = useState('');
-	const [allowed, setAllowed] = useState(false);
-	const [loading, setLoading] = useState(true);
-	const [providerEnabled, setProviderEnabled] = useState<boolean | null>(null);
-	const [capabilityFailed, setCapabilityFailed] = useState(false);
 	const [sending, setSending] = useState(false);
 	const [refresh, setRefresh] = useState(0);
 	const createController = useRef<AbortController | null>(null);
-	const sendingRef = useRef(false);
+	const { value: capabilities, failed: capabilityFailed } = usePaymentCapabilities(
+		workspaceId,
+		refresh,
+	);
 
 	useEffect(() => {
 		const controller = new AbortController();
-		void listPayments(workspaceId, controller.signal)
-			.then((payments) => {
-				if (controller.signal.aborted) return;
-				setHistory(payments);
-				setAllowed(true);
-			})
-			.catch((failure: unknown) => {
-				if (controller.signal.aborted) return;
-				setAllowed(false);
-				setHistoryError(
-					failure instanceof ApiError && failure.status === 403
-						? 'Платежи доступны только владельцу workspace.'
-						: failure instanceof Error
-							? failure.message
-							: 'Не удалось загрузить историю платежей',
-				);
-			})
-			.finally(() => {
-				if (!controller.signal.aborted) setLoading(false);
-			});
-		void getPaymentCapabilities(workspaceId, controller.signal)
-			.then((capabilities) => {
+		void listPayments(workspaceId, controller.signal).then(
+			(rows) => {
 				if (!controller.signal.aborted) {
-					setProviderEnabled(capabilities.enabled);
-					setCapabilityFailed(false);
+					setHistory({ rows, loading: false, error: '' });
 				}
-			})
-			.catch(() => {
+			},
+			(failure: unknown) => {
 				if (!controller.signal.aborted) {
-					setProviderEnabled(null);
-					setCapabilityFailed(true);
+					setHistory({ rows: null, loading: false, error: historyErrorMessage(failure) });
 				}
-			});
+			},
+		);
 		return () => controller.abort();
 	}, [workspaceId, refresh]);
 
@@ -96,42 +89,58 @@ export function PaymentsSection({ workspaceId, userId }: Props) {
 	const acceptPayment = useCallback((payment: Payment) => {
 		setCurrent((previous) => mergePaymentSnapshot(previous, payment));
 		setHistory((previous) => {
-			const next = mergePaymentSnapshot(
-				previous.find((row) => row.id === payment.id) ?? null,
-				payment,
-			);
-			return [next, ...previous.filter((row) => row.id !== payment.id)]
+			if (previous.rows === null) return previous;
+			const existing = previous.rows.find((row) => row.id === payment.id) ?? null;
+			const next = mergePaymentSnapshot(existing, payment);
+			if (next === existing) return previous;
+			const rows = [next, ...previous.rows.filter((row) => row.id !== payment.id)]
 				.sort(
 					(left, right) =>
 						right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
 				)
-				.slice(0, 20);
+				.slice(0, PAYMENT_HISTORY_LIMIT);
+			return { ...previous, rows };
 		});
 	}, []);
 
 	const canStartNew =
 		!attempt ||
-		(current?.id === attempt.paymentId && isTerminalPayment(current) && !current.needsReview);
+		(current?.id === attempt.paymentId && canStartAnotherPayment(current, capabilities));
+	const canSubmitAttempt = canStartNew || !attempt?.paymentId;
 	const canSubmit =
-		allowed &&
-		providerEnabled === true &&
-		!loading &&
+		history.rows !== null &&
+		capabilities?.enabled === true &&
+		!history.loading &&
 		!sending &&
 		!initialAttempt.error &&
-		(canStartNew || !attempt?.paymentId);
+		canSubmitAttempt;
+	const price = capabilities ? paymentAmount(capabilities) : null;
+	const providerName = capabilities ? paymentProviderLabel(capabilities.provider) : null;
+	let submitLabel = 'Повторить запрос этой попытки';
+	if (sending) submitLabel = 'Отправляем запрос…';
+	else if (!attempt) submitLabel = price ? `Тестовая оплата — ${price}` : 'Тестовая оплата';
+	else if (canStartNew) {
+		submitLabel = providerName
+			? `Новая тестовая оплата в ${providerName} — ${price}`
+			: 'Новая тестовая оплата';
+	}
+
+	const refreshHistory = () => {
+		setHistory((previous) => ({ ...previous, loading: true, error: '' }));
+		setRefresh((value) => value + 1);
+	};
 
 	const submit = async () => {
-		if (!canSubmit || sendingRef.current) return;
-		sendingRef.current = true;
-		setSending(true);
-		setError('');
+		if (!canSubmit || createController.current) return;
 		const controller = new AbortController();
 		createController.current = controller;
+		setSending(true);
+		setError('');
 		try {
 			const selectedAttempt = canStartNew ? { key: crypto.randomUUID(), paymentId: null } : attempt;
 			if (!selectedAttempt) return;
-			// Записываем ключ до HTTP: потерянный ответ и reload сохраняют ту же покупку.
 			savePaymentAttempt(localStorage, userId, workspaceId, selectedAttempt);
+			setCurrent(null);
 			setAttempt(selectedAttempt);
 			const response = await createPayment(workspaceId, selectedAttempt.key, controller.signal);
 			if (controller.signal.aborted) return;
@@ -139,14 +148,14 @@ export function PaymentsSection({ workspaceId, userId }: Props) {
 			savePaymentAttempt(localStorage, userId, workspaceId, savedAttempt);
 			setAttempt(savedAttempt);
 			acceptPayment(response.data);
-			const checkoutUrl = confirmationLink(response.data);
+			const checkoutUrl = confirmationLink(response.data, capabilities);
 			if (response.status !== 202 && checkoutUrl) window.location.assign(checkoutUrl);
 		} catch (failure) {
 			if (!controller.signal.aborted) {
 				setError(failure instanceof Error ? failure.message : 'Не удалось создать платёж');
 			}
 		} finally {
-			sendingRef.current = false;
+			if (createController.current === controller) createController.current = null;
 			if (!controller.signal.aborted) setSending(false);
 		}
 	};
@@ -158,50 +167,40 @@ export function PaymentsSection({ workspaceId, userId }: Props) {
 				<button
 					className="button-secondary"
 					type="button"
-					disabled={loading}
-					onClick={() => {
-						setLoading(true);
-						setHistoryError('');
-						setProviderEnabled(null);
-						setCapabilityFailed(false);
-						setRefresh((value) => value + 1);
-					}}
+					disabled={history.loading || sending}
+					onClick={refreshHistory}
 				>
 					Обновить историю
 				</button>
 			</div>
 			<div className="payment-purchase">
-				<strong className="payment-price">100 ₽</strong>
+				<strong className="payment-price">{price ?? '—'}</strong>
 				<div>
 					<p>Демонстрационная покупка workspace</p>
 					<p className="muted">
-						Оплата откроется на странице ЮKassa. Используйте только тестовую карту.
+						{providerName
+							? `Оплата откроется на странице ${providerName}. Используйте только тестовую карту.`
+							: 'Проверяем условия тестовой оплаты.'}
 					</p>
 				</div>
 			</div>
-			{loading && <p>Загрузка истории…</p>}
-			{historyError && (
+			{history.loading && <p>Загрузка истории…</p>}
+			{history.error && (
 				<p className="error" role="alert">
-					{historyError}
+					{history.error}
 				</p>
 			)}
-			{allowed && (
+			{history.rows !== null && (
 				<>
-					<PaymentAvailability enabled={providerEnabled} failed={capabilityFailed} />
+					<PaymentAvailability enabled={capabilities?.enabled ?? null} failed={capabilityFailed} />
 					{initialAttempt.error && (
 						<p className="error" role="alert">
 							{initialAttempt.error}
 						</p>
 					)}
-					{(canStartNew || !attempt?.paymentId) && (
+					{canSubmitAttempt && (
 						<button type="button" disabled={!canSubmit} onClick={() => void submit()}>
-							{sending
-								? 'Отправляем запрос…'
-								: !attempt
-									? 'Тестовая оплата — 100 ₽'
-									: canStartNew
-										? 'Новая тестовая оплата — 100 ₽'
-										: 'Повторить запрос этой попытки'}
+							{submitLabel}
 						</button>
 					)}
 					{attempt && !attempt.paymentId && !sending && (
@@ -218,14 +217,15 @@ export function PaymentsSection({ workspaceId, userId }: Props) {
 						<PaymentDetails
 							key={attempt.paymentId}
 							id={attempt.paymentId}
+							initialPayment={current?.id === attempt.paymentId ? current : null}
 							onPayment={acceptPayment}
-							providerEnabled={providerEnabled}
+							capabilities={capabilities}
 						/>
 					)}
 					<h3>История платежей workspace</h3>
-					{history.length === 0 && <p className="muted">Платежей пока нет.</p>}
+					{history.rows.length === 0 && <p className="muted">Платежей пока нет.</p>}
 					<ul className="payment-history">
-						{history.map((payment) => (
+						{history.rows.map((payment) => (
 							<li key={payment.id}>
 								<div className="payment-history-summary">
 									<strong>{paymentAmount(payment)}</strong>

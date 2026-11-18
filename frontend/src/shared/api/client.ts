@@ -10,7 +10,7 @@ export class ApiError extends Error {
 	}
 }
 
-async function authenticatedFetch(path: string, options: RequestInit = {}) {
+export async function authenticatedFetch(path: string, options: RequestInit = {}) {
 	const token = localStorage.getItem('token');
 	const response = await fetch(API + path, {
 		...options,
