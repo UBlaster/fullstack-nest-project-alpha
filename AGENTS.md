@@ -86,6 +86,9 @@ Cursor и Codex поддерживают корневой `AGENTS.md`; оста�
   Сохраняй workspace isolation на list- и ID-endpoints.
 - Изменения схемы оформляй migration; опубликованные migrations не переписывай.
   При неизменной схеме пустая migration не нужна, `db push` не заменяет migration.
+- Для хранения объектов используй только Yandex Cloud Object Storage.
+  Не добавляй и не запускай MinIO в проекте, включая локальные стенды, Compose,
+  тестовую инфраструктуру и учебные запуски.
 - Не выводи passwords, hashes, JWT, Authorization или значения secrets.
   Проверки с записью данных выполняй только на выделенной тестовой БД.
   Не удаляй общий PostgreSQL volume и не используй `down -v` как обычный шаг.
