@@ -2,12 +2,25 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ExportJobStatus } from '@prisma/client';
 import { Channel, ConsumeMessage } from 'amqplib';
+import { BatchObservableResult, SpanKind, trace } from '@opentelemetry/api';
+import { withMessageContext } from '../observability/carrier';
+import { getRequestId } from '../diagnostics/request-context';
+import { logEvent } from '../observability/logger';
+import { meter, secondsHistogram, withSpan } from '../observability/telemetry';
+import { recordFinishedExport } from '../exports/export-metrics';
 import { ExportMaintenanceService } from './export-maintenance.service';
 import { ExportProcessorService } from './export-processor.service';
 import { ExportDatabaseError, ExportLeaseLostError, PermanentExportError } from './export-errors';
 import { PrismaService } from '../prisma/prisma.service';
 import { ExportQueueJob, exportQueueAttempts } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
+
+type Disposition = 'completed' | 'cancelled' | 'retry' | 'deferred' | 'dead';
+const processing = meter.createHistogram('export.queue.processing', secondsHistogram);
+const queueWait = meter.createHistogram('export.queue.wait', secondsHistogram);
+const queueDepth = meter.createObservableGauge('export.queue.depth');
+const oldestAge = meter.createObservableGauge('export.queue.oldest_job_age', { unit: 's' });
+const gauges = [queueDepth, oldestAge];
 
 @Injectable()
 export class WorkerRuntimeService {
@@ -18,6 +31,7 @@ export class WorkerRuntimeService {
 	private reconnectTimer?: NodeJS.Timeout;
 	private connecting?: Promise<void>;
 	private stopping = true;
+	private readingGauges = false;
 
 	constructor(
 		_config: ConfigService,
@@ -30,6 +44,7 @@ export class WorkerRuntimeService {
 	start(): void {
 		if (!this.stopping) return;
 		this.stopping = false;
+		meter.addBatchObservableCallback(this.observeBacklog, gauges);
 		this.maintenance.start();
 		this.connect();
 	}
@@ -76,7 +91,7 @@ export class WorkerRuntimeService {
 						return;
 					}
 					if (this.stopping || closed) return;
-					const pending = this.handleDelivery(channel, message).catch(() => {
+					const pending = this.consumeMessage(channel, message).catch(() => {
 						this.logger.warn('RabbitMQ delivery unfinished; requeueing on channel close');
 						return channel.close().catch(() => {});
 					});
@@ -104,6 +119,7 @@ export class WorkerRuntimeService {
 
 	async close(force = false): Promise<void> {
 		this.stopping = true;
+		meter.removeBatchObservableCallback(this.observeBacklog, gauges);
 		if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
 		this.reconnectTimer = undefined;
 		await this.connecting;
@@ -117,7 +133,71 @@ export class WorkerRuntimeService {
 		this.consumerTag = undefined;
 	}
 
-	private async handleDelivery(channel: Channel, message: ConsumeMessage): Promise<void> {
+	private readonly observeBacklog = async (result: BatchObservableResult) => {
+		if (this.readingGauges || this.stopping) return;
+		this.readingGauges = true;
+		try {
+			await Promise.allSettled([
+				this.queues.readyDepths().then((depths) => {
+					if (!depths) return;
+					result.observe(queueDepth, depths.ready, { destination: 'ready' });
+					result.observe(queueDepth, depths.dead, { destination: 'dead' });
+				}),
+				this.prisma.exportJob
+					.aggregate({
+						where: { status: ExportJobStatus.QUEUED },
+						_min: { createdAt: true },
+					})
+					.then(({ _min }) => {
+						result.observe(
+							oldestAge,
+							_min.createdAt ? Math.max(0, Date.now() - _min.createdAt.getTime()) / 1000 : 0,
+						);
+					}),
+			]);
+		} finally {
+			this.readingGauges = false;
+		}
+	};
+
+	private consumeMessage(channel: Channel, message: ConsumeMessage): Promise<void> {
+		const headers = message.properties.headers;
+		const received = Date.now();
+		return withMessageContext(headers, () => {
+			const sent: unknown = headers?.['x-export-sent-ms'];
+			if (typeof sent === 'number' && Number.isSafeInteger(sent) && sent > 0 && sent <= received) {
+				trace
+					.getTracer('workspace-docs')
+					.startSpan('rabbitmq.wait', {
+						startTime: sent,
+						attributes: { 'messaging.system': 'rabbitmq', 'request.id': getRequestId() },
+					})
+					.end(received);
+				queueWait.record((received - sent) / 1000);
+			}
+			return withSpan(
+				'rabbitmq.consume',
+				async (span) => {
+					let result: Disposition | 'unacknowledged' = 'unacknowledged';
+					const started = performance.now();
+					try {
+						result = await this.handleDelivery(channel, message);
+					} finally {
+						const durationMs = performance.now() - started;
+						span.setAttribute('result', result);
+						processing.record(durationMs / 1000, { result });
+						logEvent(result === 'unacknowledged' ? 'warn' : 'info', 'rabbitmq.consume', {
+							result,
+							durationMs,
+						});
+					}
+				},
+				{ kind: SpanKind.CONSUMER, attributes: { 'messaging.system': 'rabbitmq' } },
+			);
+		});
+	}
+
+	private async handleDelivery(channel: Channel, message: ConsumeMessage): Promise<Disposition> {
 		let job: ExportQueueJob;
 		try {
 			job = parseExportMessage(message);
@@ -126,12 +206,12 @@ export class WorkerRuntimeService {
 				createDeadLetterPayload('invalid-message', 'invalid-message', 0, 'INVALID_FILTERS'),
 			);
 			channel.ack(message);
-			return;
+			return 'dead';
 		}
 		const queueJobId = message.properties.messageId as string;
 		let failure: unknown;
 		try {
-			await this.processor.process(job);
+			await withSpan('export.process', () => this.processor.process(job));
 		} catch (error) {
 			failure = error;
 		}
@@ -147,7 +227,7 @@ export class WorkerRuntimeService {
 				),
 			);
 			channel.ack(message);
-			return;
+			return 'dead';
 		}
 		if (current.queueJobId !== queueJobId) throw new Error('ExportMessageIdMismatch');
 		if (
@@ -155,13 +235,15 @@ export class WorkerRuntimeService {
 			current?.status === ExportJobStatus.CANCELLED
 		) {
 			channel.ack(message);
-			return;
+			return current.status === ExportJobStatus.COMPLETED ? 'completed' : 'cancelled';
 		}
 		if (!failure && current.status !== ExportJobStatus.FAILED)
 			throw new Error('ExportProcessorResolvedBeforeTerminalState');
 		const attempts = Math.max(job.attemptsMade + 1, current?.attempts ?? 0);
+		let disposition: Disposition;
 		if (current?.status === ExportJobStatus.PROCESSING || failure instanceof ExportLeaseLostError) {
 			await this.queues.deferExport(job.data, queueJobId, job.attemptsMade);
+			disposition = 'deferred';
 		} else if (
 			current?.status === ExportJobStatus.FAILED ||
 			failure instanceof PermanentExportError ||
@@ -174,7 +256,7 @@ export class WorkerRuntimeService {
 						? failure.code
 						: 'RETRIES_EXHAUSTED';
 			if (current?.status === ExportJobStatus.QUEUED) {
-				await this.prisma.exportJob.updateMany({
+				const failed = await this.prisma.exportJob.updateMany({
 					where: {
 						id: current.id,
 						queueJobId,
@@ -184,20 +266,24 @@ export class WorkerRuntimeService {
 					},
 					data: { status: ExportJobStatus.FAILED, errorCode, finishedAt: new Date() },
 				});
+				if (failed.count) recordFinishedExport(current.createdAt, 'failed');
 				const latest = await this.prisma.exportJob.findUniqueOrThrow({ where: { id: current.id } });
 				if (latest.status !== ExportJobStatus.FAILED) {
 					await this.queues.deferExport(job.data, queueJobId, job.attemptsMade);
 					channel.ack(message);
-					return;
+					return 'deferred';
 				}
 			}
 			await this.queues.addDeadLetter(
 				createDeadLetterPayload(job.data.exportJobId, queueJobId, attempts, errorCode),
 			);
+			disposition = 'dead';
 		} else {
 			await this.queues.addRetry(job.data, queueJobId, attempts);
+			disposition = 'retry';
 		}
 		channel.ack(message);
+		return disposition;
 	}
 }
 

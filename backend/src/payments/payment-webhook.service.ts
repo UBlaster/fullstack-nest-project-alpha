@@ -1,5 +1,7 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { HttpException, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { isUUID } from 'class-validator';
+import { runWithRequestId } from '../diagnostics/request-context';
+import { meter, withSpan } from '../observability/telemetry';
 import { PrismaService } from '../prisma/prisma.service';
 import {
 	isInvalidPaymentSnapshot,
@@ -9,6 +11,8 @@ import {
 } from './payment-provider';
 import { PaymentEventKey, PaymentTransitionService } from './payment-transition.service';
 import { StripePaymentProvider } from './stripe-payment.provider';
+
+const webhooks = meter.createCounter('payment.webhooks');
 
 @Injectable()
 export class PaymentWebhookService {
@@ -22,26 +26,46 @@ export class PaymentWebhookService {
 		rawBody: Buffer | undefined,
 		signature: string | string[] | undefined,
 	): Promise<void> {
-		const event = this.provider.verifyWebhook(rawBody, signature);
-		if (!event) return;
-
-		try {
-			await this.processEvent({ eventType: event.eventType, providerObjectId: event.sessionId });
-		} catch {
-			throw new ServiceUnavailableException({
-				code: 'PAYMENT_VERIFICATION_UNAVAILABLE',
-				message: 'Проверка платежа временно недоступна',
-			});
-		}
+		await withSpan('payment.webhook', async (span) => {
+			let result = 'error';
+			try {
+				const event = this.provider.verifyWebhook(rawBody, signature);
+				if (!event) {
+					result = 'ignored';
+					return;
+				}
+				try {
+					result = await this.processEvent({
+						eventType: event.eventType,
+						providerObjectId: event.sessionId,
+					});
+				} catch {
+					throw new ServiceUnavailableException({
+						code: 'PAYMENT_VERIFICATION_UNAVAILABLE',
+						message: 'Проверка платежа временно недоступна',
+					});
+				}
+			} catch (error: unknown) {
+				if (error instanceof HttpException && error.getStatus() < 500) result = 'rejected';
+				throw error;
+			} finally {
+				span.setAttribute('payment.result', result);
+				webhooks.add(1, { result });
+			}
+		});
 	}
 
 	async recoverEvent(event: PaymentEventKey): Promise<void> {
-		await this.processEvent(event);
+		await runWithRequestId(undefined, () =>
+			withSpan('payment.webhook.reconcile', async (span) => {
+				span.setAttribute('payment.result', await this.processEvent(event));
+			}),
+		);
 	}
 
 	private async processEvent(event: PaymentEventKey) {
 		try {
-			await this.verifyAndApply(event);
+			return await this.verifyAndApply(event);
 		} catch (error: unknown) {
 			const errorCode = paymentErrorCode(error);
 			if (errorCode === 'PAYMENT_EVENT_LEASE_LOST') throw error;
@@ -52,6 +76,7 @@ export class PaymentWebhookService {
 				errorCode,
 			});
 			if (!ignored) throw error;
+			return 'ignored';
 		}
 	}
 
@@ -73,7 +98,7 @@ export class PaymentWebhookService {
 				correlationId: `${event.eventType}:${event.providerObjectId}`,
 				event,
 			});
-			return;
+			return 'matched';
 		}
 		if (
 			snapshot.amountMinor !== WORKSPACE_PAYMENT_PRICE.amountMinor ||
@@ -82,5 +107,6 @@ export class PaymentWebhookService {
 			throw new PaymentProviderError('PROVIDER_AMOUNT_MISMATCH');
 		}
 		await this.transitions.recordEvent(this.prisma, event, { result: 'UNMATCHED' });
+		return 'unmatched';
 	}
 }

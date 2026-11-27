@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OutboxEvent } from '@prisma/client';
+import { withMessageContext } from '../observability/carrier';
+import { withSpan } from '../observability/telemetry';
 import { PrismaService } from '../prisma/prisma.service';
 import { ExportQueuePayload } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
@@ -46,7 +48,13 @@ export class OutboxDispatcherService implements OnModuleInit, OnModuleDestroy {
 		});
 		let published = 0;
 		for (const event of events) {
-			if (await this.publishOne(event, now, leaseCutoff)) published += 1;
+			const value = event.payload;
+			const carrier =
+				value && typeof value === 'object' && !Array.isArray(value) ? value.carrier : null;
+			const sent = await withMessageContext(carrier, () =>
+				withSpan('outbox.dispatch', () => this.publishOne(event, now, leaseCutoff)),
+			);
+			if (sent) published += 1;
 		}
 		return published;
 	}

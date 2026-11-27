@@ -391,6 +391,7 @@ describe('RabbitMQ worker acknowledgements (no DB/network)', () => {
 		processor.process.mockRejectedValue(new Error('upload failed'));
 		prisma.exportJob.findUnique.mockResolvedValue({
 			id: 'test-export',
+			createdAt: new Date(),
 			status: 'QUEUED',
 			queueJobId: 'export-test-export',
 			attempts: 4,
@@ -433,6 +434,7 @@ describe('RabbitMQ worker acknowledgements (no DB/network)', () => {
 			processor.process.mockRejectedValue(new Error('upload failed'));
 			prisma.exportJob.findUnique.mockResolvedValue({
 				id: 'test-export',
+				createdAt: new Date(),
 				status: 'QUEUED',
 				queueJobId: 'export-test-export',
 				attempts: 4,

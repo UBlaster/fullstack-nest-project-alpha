@@ -9,6 +9,8 @@ import {
 import { Prisma } from '@prisma/client';
 import { Observable } from 'rxjs';
 import { AccessPolicyService } from '../access/access-policy.service';
+import { logEvent } from '../observability/logger';
+import { withSpan } from '../observability/telemetry';
 import { PrismaService } from '../prisma/prisma.service';
 import { WORKSPACE_PAYMENT_PRICE } from './payment-provider';
 import { PaymentRecoveryService } from './payment-recovery.service';
@@ -47,11 +49,11 @@ export class PaymentsService {
 		const idempotencyKey = key.toLowerCase();
 		const purchase = { workspaceId, purpose, ...WORKSPACE_PAYMENT_PRICE };
 		const requestHash = createHash('sha256').update(JSON.stringify(purchase)).digest('hex');
-		const { payment, created } = await this.reservePayment(
-			{ userId, idempotencyKey },
-			purchase,
-			requestHash,
-		);
+		const { payment, created } = await withSpan('payment.reserve', async (span) => {
+			const result = await this.reservePayment({ userId, idempotencyKey }, purchase, requestHash);
+			span.setAttribute('payment.id', result.payment.id);
+			return result;
+		});
 		const { requestHash: savedRequestHash, firstDispatchedAt, ...reserved } = payment;
 		if (savedRequestHash !== requestHash)
 			throw new ConflictException({
@@ -60,7 +62,7 @@ export class PaymentsService {
 			});
 		let current = reserved;
 		if (created || (!firstDispatchedAt && !reserved.providerPaymentId)) {
-			await this.recovery.recover(reserved.id);
+			await this.recovery.recover(reserved.id, undefined, 'create');
 			current = await this.prisma.payment.findUniqueOrThrow({
 				where: { id: reserved.id },
 				select: { ...paymentResponseSelect, providerPaymentId: true },
@@ -79,7 +81,13 @@ export class PaymentsService {
 	}
 
 	async events(userId: string, id: string): Promise<Observable<MessageEvent>> {
-		const initial = await this.get(userId, id);
+		const snapshot = () =>
+			withSpan('payment.sse.snapshot', async (span) => {
+				const payment = await this.get(userId, id);
+				span.setAttributes({ 'payment.id': id, 'payment.status': payment.status });
+				return payment;
+			});
+		const initial = await snapshot();
 		return new Observable((subscriber) => {
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			let previous: string | undefined;
@@ -89,6 +97,7 @@ export class PaymentsService {
 				const content = JSON.stringify({ ...payment, updatedAt: undefined });
 				if (content !== previous) {
 					previous = content;
+					logEvent('info', 'payment.sse.emit', { paymentId: id, result: payment.status });
 					subscriber.next({ type: 'payment', data: payment });
 				}
 				if (terminalPayment(payment.status) || payment.needsReview) subscriber.complete();
@@ -97,7 +106,7 @@ export class PaymentsService {
 			};
 			const read = async () => {
 				try {
-					emit(await this.get(userId, id));
+					emit(await snapshot());
 				} catch (error: unknown) {
 					if (subscriber.closed) return;
 					subscriber.next({

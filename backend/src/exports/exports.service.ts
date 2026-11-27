@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { ExportJob, ExportJobStatus, OutboxEventType, WorkspaceRole } from '@prisma/client';
 import { AccessPolicyService } from '../access/access-policy.service';
+import { messageHeaders } from '../observability/carrier';
+import { recordFinishedExport } from './export-metrics';
 import { PrismaService } from '../prisma/prisma.service';
 import {
 	OBJECT_STORAGE,
@@ -32,7 +34,7 @@ export class ExportsService {
 				data: {
 					type: OutboxEventType.EXPORT_REQUESTED,
 					aggregateId: id,
-					payload: { exportJobId: id, schemaVersion: 1 },
+					payload: { exportJobId: id, schemaVersion: 1, carrier: messageHeaders() },
 				},
 			});
 			return created;
@@ -54,7 +56,7 @@ export class ExportsService {
 		const job = await this.requireAccessibleJob(userId, exportId);
 		const now = new Date();
 		while (true) {
-			await this.prisma.exportJob.updateMany({
+			const cancelled = await this.prisma.exportJob.updateMany({
 				where: { id: job.id, status: ExportJobStatus.QUEUED, objectKey: null },
 				data: {
 					status: ExportJobStatus.CANCELLED,
@@ -62,6 +64,7 @@ export class ExportsService {
 					finishedAt: now,
 				},
 			});
+			if (cancelled.count) recordFinishedExport(job.createdAt, 'cancelled');
 			await this.prisma.exportJob.updateMany({
 				where: {
 					id: job.id,

@@ -8,8 +8,11 @@ import {
 	ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { SpanKind } from '@opentelemetry/api';
 import { Prisma } from '@prisma/client';
 import type { Checkout, Stripe } from 'stripe';
+import { traceHeaders } from '../observability/carrier';
+import { meter, withSpan } from '../observability/telemetry';
 import {
 	isProviderId,
 	PaymentProviderError,
@@ -28,6 +31,8 @@ const CHECKOUT_PRODUCT_NAME = 'Workspace demo payment';
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_TRANSPORT_ATTEMPTS = 2;
 const TRANSPORT_RETRY_RESERVE_MS = 1000;
+const externalDuration = meter.createHistogram('external.duration', { unit: 'ms' });
+const externalErrors = meter.createCounter('external.errors');
 
 export interface VerifiedStripeWebhook {
 	eventId: string;
@@ -271,13 +276,17 @@ export class StripePaymentProvider implements OnModuleInit {
 	}
 
 	create(body: Prisma.JsonValue, key: string): Promise<PaymentProviderSnapshot> {
-		return this.readCheckout((sessions, timeout) =>
-			sessions.create(savedCheckoutRequest(body), { idempotencyKey: key, timeout }),
+		return this.readCheckout('create', (sessions, timeout, headers) =>
+			sessions.create(savedCheckoutRequest(body), { idempotencyKey: key, timeout, headers }),
 		);
 	}
 
 	get(id: string): Promise<PaymentProviderSnapshot> {
-		return this.readCheckout((sessions, timeout) => sessions.retrieve(id, {}, { timeout }), id);
+		return this.readCheckout(
+			'retrieve',
+			(sessions, timeout, headers) => sessions.retrieve(id, {}, { timeout, headers }),
+			id,
+		);
 	}
 
 	verifyWebhook(
@@ -302,23 +311,49 @@ export class StripePaymentProvider implements OnModuleInit {
 	}
 
 	private async readCheckout(
-		request: (sessions: Checkout.SessionResource, timeout: number) => Promise<unknown>,
+		operation: 'create' | 'retrieve',
+		request: (
+			sessions: Checkout.SessionResource,
+			timeout: number,
+			headers: Record<string, string>,
+		) => Promise<unknown>,
 		expectedId?: string,
 	): Promise<PaymentProviderSnapshot> {
 		const { apiKey } = this.requireConfiguration();
 		if (expectedId !== undefined && !isProviderId(expectedId))
 			throw new PaymentProviderError('PROVIDER_INVALID_ID');
 
-		try {
-			const sessions = this.client(apiKey).checkout.sessions;
-			const result = checkoutSnapshot(await request(sessions, this.requestTimeoutMs()));
-			if (expectedId !== undefined && result.id !== expectedId)
-				throw new PaymentProviderError('PROVIDER_ID_MISMATCH');
-			this.validateContext(result);
-			return result;
-		} catch (error: unknown) {
-			throw providerError(error);
-		}
+		const labels = { system: 'stripe', operation };
+		return withSpan(
+			`stripe.checkout.${operation}`,
+			async () => {
+				const started = performance.now();
+				let result = 'error';
+				try {
+					const sessions = this.client(apiKey).checkout.sessions;
+					const snapshot = checkoutSnapshot(
+						await request(sessions, this.requestTimeoutMs(), traceHeaders()),
+					);
+					if (expectedId !== undefined && snapshot.id !== expectedId)
+						throw new PaymentProviderError('PROVIDER_ID_MISMATCH');
+					this.validateContext(snapshot);
+					result = 'ok';
+					return snapshot;
+				} catch (error: unknown) {
+					externalErrors.add(1, labels);
+					throw providerError(error);
+				} finally {
+					externalDuration.record(performance.now() - started, { ...labels, result });
+				}
+			},
+			{
+				kind: SpanKind.CLIENT,
+				attributes: {
+					'http.request.method': operation === 'create' ? 'POST' : 'GET',
+					'payment.provider': 'stripe',
+				},
+			},
+		);
 	}
 
 	private testConfiguration() {

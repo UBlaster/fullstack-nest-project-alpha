@@ -2,12 +2,19 @@ import { randomUUID } from 'node:crypto';
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Channel, ChannelModel, ConfirmChannel, connect, Options } from 'amqplib';
+import { SpanKind } from '@opentelemetry/api';
+import { messageHeaders } from '../observability/carrier';
+import { logEvent } from '../observability/logger';
+import { meter, withSpan } from '../observability/telemetry';
 import {
 	ExportDeadLetterPayload,
 	ExportQueuePayload,
 	exportQueueAttempts,
 	exportQueueBackoffMs,
 } from './queue.constants';
+
+type Destination = 'ready' | 'retry' | 'lease' | 'dead';
+const publications = meter.createCounter('export.queue.publications');
 
 @Injectable()
 export class QueueService implements OnModuleDestroy {
@@ -51,13 +58,13 @@ export class QueueService implements OnModuleDestroy {
 	}
 
 	addExport(payload: ExportQueuePayload, queueJobId: string): Promise<void> {
-		return this.publish(this.queueName, payload, queueJobId, 0);
+		return this.publish('ready', this.queueName, payload, queueJobId, 0);
 	}
 
 	addRetry(payload: ExportQueuePayload, queueJobId: string, attemptsMade: number): Promise<void> {
 		const queue = this.retryQueueNames[attemptsMade - 1];
 		if (!queue) throw new Error('Invalid export retry attempt');
-		return this.publish(queue, payload, queueJobId, attemptsMade);
+		return this.publish('retry', queue, payload, queueJobId, attemptsMade);
 	}
 
 	deferExport(
@@ -65,11 +72,11 @@ export class QueueService implements OnModuleDestroy {
 		queueJobId: string,
 		attemptsMade: number,
 	): Promise<void> {
-		return this.publish(this.leaseQueueName, payload, queueJobId, attemptsMade);
+		return this.publish('lease', this.leaseQueueName, payload, queueJobId, attemptsMade);
 	}
 
 	addDeadLetter(payload: ExportDeadLetterPayload): Promise<void> {
-		return this.publish(this.deadQueueName, payload, `dead-${payload.sourceQueueJobId}`, 0);
+		return this.publish('dead', this.deadQueueName, payload, `dead-${payload.sourceQueueJobId}`, 0);
 	}
 
 	async createConsumerChannel(): Promise<Channel> {
@@ -78,6 +85,21 @@ export class QueueService implements OnModuleDestroy {
 		const abort = this.connectionAbort;
 		if (!connection || !abort) throw new Error('RabbitMQUnavailable');
 		return this.withTimeout(connection.createChannel(), abort);
+	}
+
+	// Passive inspections use their own channel. A failed inspection must never close a
+	// publisher or consumer channel, or cause an otherwise idle API to open a connection.
+	async readyDepths(): Promise<{ ready: number; dead: number } | undefined> {
+		if (this.closing || !this.connection) return;
+		const channel = await this.connection.createChannel();
+		channel.on('error', () => {});
+		try {
+			const ready = await channel.checkQueue(this.queueName);
+			const dead = await channel.checkQueue(this.deadQueueName);
+			return { ready: ready.messageCount, dead: dead.messageCount };
+		} finally {
+			await channel.close().catch(() => {});
+		}
 	}
 
 	async onModuleDestroy(): Promise<void> {
@@ -90,7 +112,25 @@ export class QueueService implements OnModuleDestroy {
 		this.connectionAbort = undefined;
 	}
 
-	private async publish(
+	private publish(
+		destination: Destination,
+		queue: string,
+		payload: ExportQueuePayload | ExportDeadLetterPayload,
+		messageId: string,
+		attemptsMade: number,
+	): Promise<void> {
+		return withSpan(
+			'rabbitmq.publish',
+			async () => {
+				await this.sendConfirmed(queue, payload, messageId, attemptsMade);
+				publications.add(1, { destination });
+				logEvent('info', 'rabbitmq.publish', { result: destination });
+			},
+			{ kind: SpanKind.PRODUCER, attributes: { 'messaging.system': 'rabbitmq', destination } },
+		);
+	}
+
+	private async sendConfirmed(
 		queue: string,
 		payload: ExportQueuePayload | ExportDeadLetterPayload,
 		messageId: string,
@@ -107,7 +147,11 @@ export class QueueService implements OnModuleDestroy {
 			contentType: 'application/json',
 			messageId,
 			correlationId,
-			headers: { 'x-export-attempts': attemptsMade },
+			headers: {
+				...messageHeaders(),
+				'x-export-attempts': attemptsMade,
+				'x-export-sent-ms': Date.now(),
+			},
 		};
 		await new Promise<void>((resolve, reject) => {
 			let settled = false;

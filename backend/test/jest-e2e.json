@@ -3,7 +3,11 @@
 	"rootDir": ".",
 	"testEnvironment": "node",
 	"testTimeout": 30000,
-	"testRegex": ".e2e-spec.ts$",
+	"testMatch": [
+		"**/*.e2e-spec.ts",
+		"!**/document-body-release-[ab].e2e-spec.ts",
+		"!**/backfill-document-body.e2e-spec.ts"
+	],
 	"transform": {
 		"^.+\\.(t|j)s$": ["ts-jest", { "tsconfig": "<rootDir>/tsconfig.json" }]
 	}

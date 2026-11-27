@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { ExecutionContext, INestApplication, Logger, UnauthorizedException } from '@nestjs/common';
+import { ExecutionContext, INestApplication, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
-import { PrismaClient, WorkspaceRole } from '@prisma/client';
+import { Prisma, PrismaClient, WorkspaceRole } from '@prisma/client';
 import * as request from 'supertest';
 import { AccessPolicyService } from '../src/access/access-policy.service';
 import { AuthenticatedRequest } from '../src/auth/authenticated-request';
@@ -20,29 +20,27 @@ import { OBJECT_STORAGE, STORAGE_CONFIG, StorageConfig } from '../src/storage/st
 import { createAppValidationPipe } from '../src/validation.pipe';
 import { isolatedConfig } from './test-config';
 
-const describeReleaseCD = process.env.TASK7_RELEASE_CD_E2E === 'true' ? describe : describe.skip;
-
-function dedicatedDatabaseUrl(): string {
-	const value = process.env.TASK7_RELEASE_CD_DATABASE_URL;
-	if (!value) throw new Error('TASK7_RELEASE_CD_DATABASE_URL is required for this opt-in suite');
+function dedicatedDatabase() {
+	const value = process.env.TASK7_RELEASE_CD_DATABASE_URL ?? process.env.DATABASE_URL;
+	if (!value) throw new Error('DATABASE_URL must point to a dedicated test database');
 	let target: URL;
 	try {
 		target = new URL(value);
 	} catch {
-		throw new Error('Invalid C/D test database configuration');
+		throw new Error('Invalid document body test database configuration');
 	}
+	const name = decodeURIComponent(target.pathname.slice(1));
 	if (
 		!['postgres:', 'postgresql:'].includes(target.protocol) ||
-		!['localhost', '127.0.0.1'].includes(target.hostname) ||
-		target.port !== '55437' ||
-		target.pathname !== '/task7_release_cd_test' ||
+		!['localhost', '127.0.0.1', '[::1]', 'postgres'].includes(target.hostname) ||
+		!/^[\w-]+$/.test(name) ||
+		!/(?:^|[_-])(?:test|e2e)(?:[_-]|$)/i.test(name) ||
 		(target.searchParams.get('schema') ?? 'public') !== 'public' ||
-		target.searchParams.getAll('schema').length > 1 ||
-		[...target.searchParams.keys()].some((key) => key !== 'schema')
+		target.searchParams.getAll('schema').length > 1
 	) {
-		throw new Error('Only the dedicated local task7_release_cd_test database is allowed');
+		throw new Error('Document body tests require a local test database and the public schema');
 	}
-	return value;
+	return { url: value, name };
 }
 
 function queryClient(url: string) {
@@ -58,8 +56,8 @@ function publicDocument(value: unknown, content: string): { id: string; content:
 	return value as { id: string; content: string };
 }
 
-describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', () => {
-	const runId = `task7-release-cd-${randomUUID()}`;
+describe('Document.body in Prisma with content in the HTTP API', () => {
+	const runId = `document-body-${randomUUID()}`;
 	const ids = {
 		owner: `${runId}-owner`,
 		viewer: `${runId}-viewer`,
@@ -83,45 +81,27 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 		remove: jest.fn().mockResolvedValue(undefined),
 	};
 	const storageConfig: StorageConfig = {
-		bucket: 'task7-cd-test',
+		bucket: 'document-body-test',
 		uploadTtlSeconds: 60,
 		downloadTtlSeconds: 60,
 	};
 	let app: INestApplication;
 	let prisma: ReturnType<typeof queryClient>;
-	let error: jest.SpyInstance;
+	let accessPolicy: AccessPolicyService;
 	let databaseVerified = false;
-	let hasLegacy = false;
-	let bodyNullable = true;
 	let captureQueries = false;
 	const queries: string[] = [];
 	const auth = (userId = ids.owner) => ({ 'x-task7-user-id': userId });
-	const fixtureDocument = async (body: string): Promise<{ id: string }> => {
-		const [document] = await prisma.$queryRaw<Array<{ id: string }>>`
-			INSERT INTO "Document" ("id", "projectId", "authorId", "title", "body", "updatedAt")
-			VALUES (${randomUUID()}, ${ids.project}, ${ids.owner}, 'C/D fixture', ${body}, CURRENT_TIMESTAMP)
-			RETURNING "id"
-		`;
-		return document;
-	};
-	const storedBody = async (id: string) => {
-		const [document] = await prisma.$queryRaw<
-			Array<{ title: string; body: string | null; updatedAt: Date }>
-		>`SELECT "title", "body", "updatedAt" FROM "Document" WHERE "id" = ${id}`;
-		if (!document) throw new Error('C/D fixture document was not found');
-		return document;
-	};
-	const legacy = async (id: string): Promise<string | null | undefined> => {
-		if (!hasLegacy) return undefined;
-		const [row] = await prisma.$queryRaw<Array<{ content: string | null }>>`
-			SELECT "content" FROM "Document" WHERE "id" = ${id}
-		`;
-		return row.content;
-	};
-	const setLegacy = async (id: string, value: string) => {
-		if (hasLegacy)
-			await prisma.$executeRaw`UPDATE "Document" SET "content" = ${value} WHERE "id" = ${id}`;
-	};
+	const fixtureDocument = (body: string) =>
+		prisma.document.create({
+			data: { projectId: ids.project, authorId: ids.owner, title: 'Document fixture', body },
+			select: { id: true },
+		});
+	const storedBody = (id: string) =>
+		prisma.document.findUniqueOrThrow({
+			where: { id },
+			select: { title: true, body: true, updatedAt: true },
+		});
 	const captured = async <T>(work: () => Promise<T>): Promise<T> => {
 		queries.length = 0;
 		captureQueries = true;
@@ -142,7 +122,7 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 				.expect(200);
 			publicDocument(fetched.body, expected);
 			expect(fetched.body).toMatchObject({
-				author: { name: 'C/D test user' },
+				author: { name: 'Document test user' },
 				project: { id: ids.project, workspaceId: ids.workspace },
 			});
 			const listed = await request(app.getHttpServer())
@@ -152,7 +132,7 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 			const rows = listed.body as Array<{ id: string }>;
 			const listedDocument = rows.find((row) => row.id === id);
 			publicDocument(listedDocument, expected);
-			expect(listedDocument).toMatchObject({ author: { name: 'C/D test user' } });
+			expect(listedDocument).toMatchObject({ author: { name: 'Document test user' } });
 			const project = await request(app.getHttpServer())
 				.get(`/projects/${ids.project}`)
 				.set(auth())
@@ -160,12 +140,24 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 			const nestedRows = project.body.documents as Array<{ id: string }>;
 			const nested = nestedRows.find((row) => row.id === id);
 			publicDocument(nested, expected);
-			expect(nested).toMatchObject({ author: { name: 'C/D test user' } });
+			expect(nested).toMatchObject({ author: { name: 'Document test user' } });
 		});
 	};
 
 	beforeAll(async () => {
-		prisma = queryClient(dedicatedDatabaseUrl());
+		const fields = Prisma.dmmf.datamodel.models.find((model) => model.name === 'Document')?.fields;
+		if (
+			!fields?.some(
+				(field) => field.name === 'body' && field.type === 'String' && field.isRequired,
+			) ||
+			fields.some((field) => field.name === 'content')
+		) {
+			throw new Error(
+				'Generate Prisma Client from the current schema before running document tests',
+			);
+		}
+		const { url, name } = dedicatedDatabase();
+		prisma = queryClient(url);
 		prisma.$on('query', (event) => {
 			// Параметры не сохраняются и не логируются; нужны только имена колонок в рабочем SQL.
 			if (captureQueries && event.query.includes('"Document"')) queries.push(event.query);
@@ -174,48 +166,48 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 		const [target] = await prisma.$queryRaw<Array<{ database: string; schema: string }>>`
 			SELECT current_database() AS database, current_schema() AS schema
 		`;
-		if (target.database !== 'task7_release_cd_test' || target.schema !== 'public') {
-			throw new Error('C/D test database identity did not match its isolated target');
+		if (target.database !== name || target.schema !== 'public') {
+			throw new Error('Document test database identity did not match its isolated target');
 		}
-		const columns = await prisma.$queryRaw<Array<{ name: string; nullable: string }>>`
-			SELECT column_name AS name, is_nullable AS nullable FROM information_schema.columns
+		const columns = await prisma.$queryRaw<Array<{ name: string; nullable: string; type: string }>>`
+			SELECT column_name AS name, is_nullable AS nullable, data_type AS type
+			FROM information_schema.columns
 			WHERE table_schema = 'public' AND table_name = 'Document' AND column_name IN ('content', 'body')
 		`;
-		hasLegacy = columns.some((column) => column.name === 'content');
-		const bodyColumn = columns.find((column) => column.name === 'body');
-		if (!bodyColumn) throw new Error('The C/D test database is missing body');
-		bodyNullable = bodyColumn.nullable === 'YES';
+		expect(columns).toEqual([{ name: 'body', nullable: 'NO', type: 'text' }]);
 		databaseVerified = true;
 		await prisma.user.createMany({
 			data: [...users].map(([id, email]) => ({
 				id,
 				email,
-				name: 'C/D test user',
+				name: 'Document test user',
 				password: 'fixture-without-password-login',
 			})),
 		});
 		await prisma.workspace.create({
 			data: {
 				id: ids.workspace,
-				name: 'C/D test workspace',
+				name: 'Document test workspace',
 				members: {
 					create: [
 						{ userId: ids.owner, role: WorkspaceRole.OWNER },
 						{ userId: ids.viewer, role: WorkspaceRole.VIEWER },
 					],
 				},
-				projects: { create: { id: ids.project, name: 'C/D project', createdById: ids.owner } },
+				projects: {
+					create: { id: ids.project, name: 'Document test project', createdById: ids.owner },
+				},
 			},
 		});
 		await prisma.workspace.create({
 			data: {
 				id: ids.foreignWorkspace,
-				name: 'Foreign C/D workspace',
+				name: 'Foreign document test workspace',
 				members: { create: { userId: ids.outsider, role: WorkspaceRole.OWNER } },
 				projects: {
 					create: {
 						id: ids.foreignProject,
-						name: 'Foreign C/D project',
+						name: 'Foreign document test project',
 						createdById: ids.outsider,
 					},
 				},
@@ -252,14 +244,13 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 				},
 			})
 			.compile();
+		accessPolicy = module.get(AccessPolicyService);
 		app = module.createNestApplication();
 		app.useGlobalPipes(createAppValidationPipe());
 		await app.init();
-		error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
 	});
 
 	beforeEach(() => {
-		error.mockClear();
 		cache.invalidateWorkspace.mockClear();
 		for (const mock of Object.values(storage)) mock.mockClear();
 	});
@@ -278,7 +269,6 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 				await prisma.user.deleteMany({ where: { id: { in: [...users.keys()] } } });
 			}
 		} finally {
-			error?.mockRestore();
 			if (app) await app.close();
 			if (prisma) await prisma.$disconnect();
 		}
@@ -288,7 +278,7 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 		{ created: '', updated: 'Body-only Unicode\n日本語 😀' },
 		{ created: 'Original Unicode\n日本語 😀', updated: '' },
 	])(
-		'uses only body in all seven response paths and preserves legacy when present: %j',
+		'stores body and returns content in all seven HTTP response paths: %j',
 		async ({ created, updated }) => {
 			const response = await captured(async () =>
 				request(app.getHttpServer())
@@ -299,8 +289,6 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 			);
 			const document = publicDocument(response.body, created);
 			expect((await storedBody(document.id)).body).toBe(created);
-			expect(await legacy(document.id)).toBe(hasLegacy ? null : undefined);
-			await setLegacy(document.id, 'Frozen legacy value');
 			await readPaths(document.id, created);
 			const patched = await captured(async () =>
 				request(app.getHttpServer())
@@ -311,7 +299,6 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 			);
 			publicDocument(patched.body, updated);
 			expect((await storedBody(document.id)).body).toBe(updated);
-			expect(await legacy(document.id)).toBe(hasLegacy ? 'Frozen legacy value' : undefined);
 			const title = await captured(async () =>
 				request(app.getHttpServer())
 					.patch(`/documents/${document.id}`)
@@ -324,7 +311,6 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 				title: 'Only title changed',
 				body: updated,
 			});
-			expect(await legacy(document.id)).toBe(hasLegacy ? 'Frozen legacy value' : undefined);
 			const archived = await captured(async () =>
 				request(app.getHttpServer())
 					.patch(`/documents/${document.id}/archive`)
@@ -344,9 +330,8 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 		},
 	);
 
-	it('keeps concurrent body updates independent from legacy', async () => {
+	it('persists one of the concurrent content updates in body', async () => {
 		const document = await fixtureDocument('Initial body');
-		await setLegacy(document.id, 'Unchanged legacy');
 		const values = Array.from({ length: 12 }, (_, index) => `Body update ${index} 😀`);
 		await captured(async () => {
 			await Promise.all(
@@ -361,8 +346,48 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 			);
 		});
 		expect(values).toContain((await storedBody(document.id)).body);
-		expect(await legacy(document.id)).toBe(hasLegacy ? 'Unchanged legacy' : undefined);
 	});
+
+	it('keeps the latest body when a title-only PATCH races with a text update', async () => {
+		const document = await fixtureDocument('Original body');
+		const latestBody = 'Body written by a concurrent request';
+		const requireDocument = accessPolicy.requireDocument.bind(accessPolicy);
+		const concurrentWrite = jest
+			.spyOn(accessPolicy, 'requireDocument')
+			.mockImplementationOnce(async (...args) => {
+				const context = await requireDocument(...args);
+				await prisma.document.update({ where: { id: document.id }, data: { body: latestBody } });
+				return context;
+			});
+		try {
+			const result = await captured(() =>
+				request(app.getHttpServer())
+					.patch(`/documents/${document.id}`)
+					.set(auth())
+					.send({ title: 'New title' })
+					.expect(200),
+			);
+			publicDocument(result.body, latestBody);
+			expect(await storedBody(document.id)).toMatchObject({ title: 'New title', body: latestBody });
+		} finally {
+			concurrentWrite.mockRestore();
+		}
+	});
+
+	it.each([null, 42, false, [], {}])(
+		'rejects invalid POST content %j without creating a document',
+		async (content) => {
+			const where = { projectId: ids.project };
+			const count = await prisma.document.count({ where });
+			await request(app.getHttpServer())
+				.post(`/projects/${ids.project}/documents`)
+				.set(auth())
+				.send({ title: 'Invalid document', content })
+				.expect(400);
+			expect(await prisma.document.count({ where })).toBe(count);
+			expect(cache.invalidateWorkspace).not.toHaveBeenCalled();
+		},
+	);
 
 	it.each([null, 42, false, [], {}])(
 		'rejects invalid PATCH content %j without writes',
@@ -379,59 +404,18 @@ describeReleaseCD('Task 7 C/D HTTP compatibility and legacy-free document SQL', 
 		},
 	);
 
-	it('reports NULL body integrity before contract and rejects NULL at the DB boundary after contract', async () => {
+	it('rejects a NULL body at the PostgreSQL boundary', async () => {
 		const documentId = `${runId}-invalid`;
-		const insertNull = () => prisma.$executeRaw`
-			INSERT INTO "Document" ("id", "projectId", "authorId", "title", "body", "updatedAt")
-			VALUES (${documentId}, ${ids.project}, ${ids.owner}, 'NULL fixture', NULL, NOW())
-		`;
-		if (!bodyNullable) {
-			await expect(insertNull()).rejects.toMatchObject({
-				code: 'P2010',
-				meta: expect.objectContaining({ code: '23502' }),
-			});
-			expect(await prisma.document.count({ where: { id: documentId } })).toBe(0);
-			return;
-		}
-		await insertNull();
-		await setLegacy(documentId, 'Legacy must not rescue a missing body');
-		await captured(async () => {
-			for (const path of [
-				`/documents/${documentId}`,
-				`/projects/${ids.project}/documents`,
-				`/projects/${ids.project}`,
-			]) {
-				const response = await request(app.getHttpServer()).get(path).set(auth()).expect(500);
-				expect(response.body).toMatchObject({ statusCode: 500 });
-				expect(response.body).not.toHaveProperty('stack');
-				expect(JSON.stringify(response.body)).not.toContain(documentId);
-			}
+		await expect(
+			prisma.$executeRaw`
+				INSERT INTO "Document" ("id", "projectId", "authorId", "title", "body", "updatedAt")
+				VALUES (${documentId}, ${ids.project}, ${ids.owner}, 'NULL fixture', NULL, NOW())
+			`,
+		).rejects.toMatchObject({
+			code: 'P2010',
+			meta: expect.objectContaining({ code: '23502' }),
 		});
-		const entries = error.mock.calls.flatMap(([message]: unknown[]) => {
-			if (typeof message !== 'string') return [];
-			try {
-				const entry: unknown = JSON.parse(message);
-				if (
-					typeof entry === 'object' &&
-					entry !== null &&
-					'event' in entry &&
-					entry.event === 'document.text.integrity_error'
-				)
-					return [entry];
-			} catch {
-				return [];
-			}
-			return [];
-		});
-		expect(entries).toHaveLength(3);
-		for (const entry of entries) {
-			expect(Object.keys(entry).sort()).toEqual(['count', 'event', 'instance', 'release']);
-			expect(entry).toMatchObject({
-				release: 'C',
-				instance: expect.any(String),
-				count: expect.any(Number),
-			});
-		}
+		expect(await prisma.document.count({ where: { id: documentId } })).toBe(0);
 	});
 
 	it('preserves RBAC and hidden tenant checks without selecting legacy', async () => {

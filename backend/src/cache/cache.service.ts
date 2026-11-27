@@ -2,6 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import Redis from 'ioredis';
+import { SpanKind } from '@opentelemetry/api';
+import { meter, secondsHistogram, withSpan } from '../observability/telemetry';
 import { CACHE_CONFIG, CacheConfig, REDIS_CLIENT, SearchCacheParams } from './cache.tokens';
 
 const releaseLockScript = `
@@ -18,6 +20,15 @@ interface CacheRead<T> {
 
 const connectionCooldownMs = 1000;
 const shutdownTimeoutMs = 500;
+const redisDuration = meter.createHistogram('redis.duration', secondsHistogram);
+const redisErrors = meter.createCounter('redis.errors');
+const cacheLookups = meter.createCounter('cache.lookups');
+
+function keyNamespace(key: string) {
+	if (key.endsWith(':projects')) return 'projects';
+	if (key.includes(':search:')) return 'search';
+	return 'metadata';
+}
 
 export function ttlWithJitter(baseTtlSeconds: number, random: () => number = Math.random) {
 	const base = Math.max(1, Math.trunc(baseTtlSeconds));
@@ -70,7 +81,11 @@ export class CacheService implements OnModuleDestroy {
 		if (!this.config.enabled || !this.redis) return null;
 		if (!(await this.ensureConnected())) return null;
 		try {
-			return (await this.redis.get(this.workspaceVersionKey(workspaceId))) ?? '0';
+			return (
+				(await this.command('get', 'version', (redis) =>
+					redis.get(this.workspaceVersionKey(workspaceId)),
+				)) ?? '0'
+			);
 		} catch (error) {
 			this.logFailure('version read', error);
 			return null;
@@ -81,7 +96,9 @@ export class CacheService implements OnModuleDestroy {
 		if (!this.config.enabled || !this.redis) return;
 		if (!(await this.ensureConnected())) return;
 		try {
-			await this.redis.incr(this.workspaceVersionKey(workspaceId));
+			await this.command('incr', 'version', (redis) =>
+				redis.incr(this.workspaceVersionKey(workspaceId)),
+			);
 		} catch (error) {
 			this.logFailure('workspace invalidation', error);
 		}
@@ -91,6 +108,8 @@ export class CacheService implements OnModuleDestroy {
 		if (!this.config.enabled || !this.redis) return load();
 
 		const firstRead = await this.read<T>(key);
+		const result = !firstRead.available ? 'unavailable' : firstRead.hit ? 'hit' : 'miss';
+		cacheLookups.add(1, { namespace: keyNamespace(key), result });
 		if (firstRead.hit) return firstRead.value as T;
 		if (!firstRead.available) return load();
 
@@ -98,7 +117,9 @@ export class CacheService implements OnModuleDestroy {
 		const token = randomUUID();
 		let acquired: string | null;
 		try {
-			acquired = await this.redis.set(lockKey, token, 'PX', this.config.lockTtlMs, 'NX');
+			acquired = await this.command('set', 'lock', (redis) =>
+				redis.set(lockKey, token, 'PX', this.config.lockTtlMs, 'NX'),
+			);
 		} catch (error) {
 			this.logFailure('lock acquisition', error);
 			return load();
@@ -150,7 +171,7 @@ export class CacheService implements OnModuleDestroy {
 
 		let raw: string | null | undefined;
 		try {
-			raw = await this.redis?.get(key);
+			raw = await this.command('get', keyNamespace(key), (redis) => redis.get(key));
 		} catch (error) {
 			this.logFailure('GET', error);
 			return { available: false, hit: false };
@@ -171,7 +192,9 @@ export class CacheService implements OnModuleDestroy {
 		if (!(await this.ensureConnected())) return;
 		const ttl = ttlWithJitter(ttlSeconds);
 		try {
-			await this.redis?.set(key, JSON.stringify(value), 'EX', ttl);
+			await this.command('set', keyNamespace(key), (redis) =>
+				redis.set(key, JSON.stringify(value), 'EX', ttl),
+			);
 		} catch (error) {
 			this.logFailure('write', error);
 		}
@@ -180,24 +203,45 @@ export class CacheService implements OnModuleDestroy {
 	private async releaseLock(lockKey: string, token: string) {
 		if (this.redis?.status !== 'ready') return;
 		try {
-			await this.redis?.eval(releaseLockScript, 1, lockKey, token);
+			await this.command('eval', 'lock', (redis) =>
+				redis.eval(releaseLockScript, 1, lockKey, token),
+			);
 		} catch (error) {
 			this.logFailure('lock release', error);
 		}
 	}
 
-	private logFailure(operation: string, error: unknown) {
+	private command<T>(
+		operation: 'get' | 'incr' | 'set' | 'eval' | 'del' | 'connect',
+		namespace: 'version' | 'lock' | 'projects' | 'search' | 'metadata' | 'connection',
+		run: (client: Redis) => Promise<T>,
+	): Promise<T> {
+		const labels = { operation, namespace };
+		return withSpan(
+			`redis.${operation}`,
+			async () => {
+				const start = performance.now();
+				try {
+					if (!this.redis) throw new Error('Redis unavailable');
+					return await run(this.redis);
+				} catch (error) {
+					redisErrors.add(1, labels);
+					throw error;
+				} finally {
+					redisDuration.record((performance.now() - start) / 1000, labels);
+				}
+			},
+			{ kind: SpanKind.CLIENT, attributes: labels },
+		);
+	}
+
+	private logFailure(operation: string, _error: unknown) {
 		const now = Date.now();
 		const lastLoggedAt = this.lastFailureLogAt.get(operation) ?? 0;
 		if (now - lastLoggedAt < connectionCooldownMs) return;
 		this.lastFailureLogAt.set(operation, now);
 
-		const name = error instanceof Error ? error.name : 'UnknownError';
-		const code =
-			typeof error === 'object' && error !== null && 'code' in error
-				? String(error.code)
-				: undefined;
-		this.logger.warn(`Cache ${operation} failed: ${name}${code ? ` (${code})` : ''}`);
+		this.logger.warn(`Cache ${operation} failed`);
 	}
 
 	private readonly handleClientError = (error: unknown) => {
@@ -206,7 +250,7 @@ export class CacheService implements OnModuleDestroy {
 
 	private async deleteCorruptedKey(key: string) {
 		try {
-			await this.redis?.del(key);
+			await this.command('del', keyNamespace(key), (redis) => redis.del(key));
 		} catch (error) {
 			this.logFailure('corrupted key cleanup', error);
 		}
@@ -233,8 +277,7 @@ export class CacheService implements OnModuleDestroy {
 		if (Date.now() < this.unavailableUntil) return false;
 		if (this.connectionPromise) return this.connectionPromise;
 
-		this.connectionPromise = this.redis
-			.connect()
+		this.connectionPromise = this.command('connect', 'connection', (redis) => redis.connect())
 			.then(() => true)
 			.catch((error: unknown) => {
 				this.unavailableUntil = Date.now() + connectionCooldownMs;

@@ -428,7 +428,11 @@ describe('Task 6 background exports (e2e)', () => {
 			}),
 		]);
 		expect(job?.filters).toEqual({ schemaVersion: 1 });
-		expect(event?.payload).toEqual({ exportJobId: response.body.id, schemaVersion: 1 });
+		expect(event?.payload).toMatchObject({
+			exportJobId: response.body.id,
+			schemaVersion: 1,
+			carrier: expect.any(Object),
+		});
 		await prisma.outboxEvent.updateMany({
 			where: { aggregateId: response.body.id },
 			data: { publishedAt: new Date() },
@@ -782,7 +786,7 @@ describe('Task 6 background exports (e2e)', () => {
 		expect(status.body.downloadUrl).toMatch(/^https:\/\/example\.invalid\/download\//);
 	});
 
-	it('streams more than 500 rows with keyset pages and never selects content', async () => {
+	it('streams more than 500 rows with keyset pages selecting only CSV metadata', async () => {
 		const documentIds = Array.from(
 			{ length: 501 },
 			(_value, index) => `${runId}-paged-document-${String(index).padStart(3, '0')}`,
@@ -806,7 +810,14 @@ describe('Task 6 background exports (e2e)', () => {
 			for (const query of pageQueries) {
 				expect(query?.where?.project).toEqual({ workspaceId: ids.workspace });
 				expect(query?.orderBy).toEqual({ id: 'asc' });
-				expect(query?.select).not.toHaveProperty('content');
+				expect(query?.select).toStrictEqual({
+					id: true,
+					projectId: true,
+					title: true,
+					status: true,
+					updatedAt: true,
+					author: { select: { name: true } },
+				});
 			}
 			expect(pageQueries[1]?.where).toHaveProperty('id.gt');
 			const completed = await prisma.exportJob.findUniqueOrThrow({ where: { id: job.id } });

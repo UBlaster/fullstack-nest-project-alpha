@@ -769,7 +769,7 @@ describe('Task 5 object storage and streaming export (e2e)', () => {
 		}
 	});
 
-	it('uses keyset pages of 500 without selecting content', async () => {
+	it('uses keyset pages of 500 selecting only CSV metadata', async () => {
 		const row = (index: number) => ({
 			id: `row-${String(index).padStart(4, '0')}`,
 			projectId: ids.project,
@@ -799,7 +799,16 @@ describe('Task 5 object storage and streaming export (e2e)', () => {
 				orderBy: { id: 'asc' },
 				take: 500,
 			});
-			expect(findMany.mock.calls[0][0]?.select).not.toHaveProperty('content');
+			for (const [query] of findMany.mock.calls) {
+				expect(query?.select).toStrictEqual({
+					id: true,
+					projectId: true,
+					title: true,
+					status: true,
+					updatedAt: true,
+					author: { select: { name: true } },
+				});
+			}
 			expect(findMany.mock.calls[1][0]).toMatchObject({
 				where: {
 					project: { workspaceId: ids.workspace },

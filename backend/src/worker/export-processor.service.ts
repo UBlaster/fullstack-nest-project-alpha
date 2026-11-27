@@ -10,6 +10,8 @@ import {
 	exportBatchSize,
 } from '../documents/documents-export.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { withSpan } from '../observability/telemetry';
+import { recordFinishedExport } from '../exports/export-metrics';
 import { ExportQueueJob, exportQueueAttempts } from '../queue/queue.constants';
 import { OBJECT_STORAGE, ObjectStorageService } from '../storage/storage.tokens';
 import {
@@ -78,7 +80,7 @@ export class ExportProcessorService {
 			await this.handlePreClaimFailure(job, current, error);
 		}
 
-		const claim = await this.claim(current);
+		const claim = await withSpan('export.claim', () => this.claim(current));
 		if (!claim) {
 			const latest = await this.database(() =>
 				this.prisma.exportJob.findUnique({ where: { id: current.id } }),
@@ -89,7 +91,7 @@ export class ExportProcessorService {
 		}
 
 		try {
-			await this.buildAndStore(claim);
+			await withSpan('export.build_and_store', () => this.buildAndStore(claim));
 		} catch (error) {
 			if (error instanceof ExportDatabaseError) throw error;
 			if (error instanceof CancelledExportError) {
@@ -208,7 +210,7 @@ export class ExportProcessorService {
 			}
 			output.end();
 		};
-		const producer = produce();
+		const producer = withSpan('export.csv', produce);
 		const pipeline = Promise.all([producer, upload]);
 		const monitor = this.monitorActive(
 			claim,
@@ -266,6 +268,7 @@ export class ExportProcessorService {
 			}
 			throw new ExportLeaseLostError();
 		}
+		recordFinishedExport(claim.createdAt, 'completed');
 	}
 
 	private async monitorActive(
@@ -399,6 +402,7 @@ export class ExportProcessorService {
 			}),
 		);
 		if (cancelled.count === 0) throw new ExportLeaseLostError();
+		recordFinishedExport(job.createdAt, 'cancelled');
 	}
 
 	private async recordQueuedCleanupFailure(job: ExportJob, finalAttempt: boolean): Promise<void> {
@@ -423,6 +427,7 @@ export class ExportProcessorService {
 			}),
 		);
 		if (updated.count === 0) throw new ExportLeaseLostError();
+		if (finalAttempt) recordFinishedExport(job.createdAt, 'failed');
 	}
 
 	private async finishCancelled(claim: ClaimedExport): Promise<void> {
@@ -445,6 +450,7 @@ export class ExportProcessorService {
 			}),
 		);
 		if (cancelled.count === 0) throw new ExportLeaseLostError();
+		recordFinishedExport(claim.createdAt, 'cancelled');
 	}
 
 	private async failQueued(job: ExportJob, errorCode: string): Promise<void> {
@@ -460,6 +466,7 @@ export class ExportProcessorService {
 			}),
 		);
 		if (failed.count === 0) throw new ExportLeaseLostError();
+		recordFinishedExport(job.createdAt, 'failed');
 	}
 
 	private async handlePreClaimFailure(
@@ -494,6 +501,7 @@ export class ExportProcessorService {
 			}),
 		);
 		if (updated.count === 0) throw new ExportLeaseLostError();
+		if (finalAttempt) recordFinishedExport(job.createdAt, 'failed');
 		throw error instanceof Error ? error : new Error('Unknown pre-claim export failure');
 	}
 
@@ -515,6 +523,7 @@ export class ExportProcessorService {
 			}),
 		);
 		if (failed.count === 0) throw new ExportLeaseLostError();
+		recordFinishedExport(claim.createdAt, 'failed');
 	}
 
 	private async finishCleanupFailure(claim: ClaimedExport, finalAttempt: boolean): Promise<void> {

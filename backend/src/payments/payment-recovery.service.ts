@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { PaymentStatus, Prisma } from '@prisma/client';
 import { Injectable } from '@nestjs/common';
+import { getRequestId, runWithRequestId } from '../diagnostics/request-context';
+import { logEvent } from '../observability/logger';
+import { meter, withSpan } from '../observability/telemetry';
 import { PrismaService } from '../prisma/prisma.service';
 import {
 	isInvalidPaymentSnapshot,
@@ -16,6 +19,7 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const CREATE_WINDOW_MS = 23 * HOUR_MS;
 const activeStatuses: PaymentStatus[] = ['CREATED', 'PENDING'];
+const reconciliations = meter.createCounter('payment.reconciliations');
 
 const recoverySelect = {
 	id: true,
@@ -55,17 +59,46 @@ export class PaymentRecoveryService {
 		return this.provider.httpTimeoutMs() + 10_000;
 	}
 
-	async recover(id: string, dueAt?: Date): Promise<void> {
+	recover(
+		id: string,
+		dueAt?: Date,
+		source: 'manual' | 'create' | 'scheduled' = dueAt ? 'scheduled' : 'manual',
+	): Promise<void> {
+		const operation = source === 'create' ? 'payment.dispatch' : 'payment.reconcile';
+		const observe = () =>
+			withSpan(
+				operation,
+				async (span) => {
+					let result = 'error';
+					try {
+						result = await this.recoverPayment(id, dueAt);
+					} finally {
+						span.setAttribute('payment.result', result);
+						logEvent(result === 'error' ? 'warn' : 'info', operation, {
+							paymentId: id,
+							source,
+							result,
+						});
+						if (source !== 'create') reconciliations.add(1, { source, result });
+					}
+				},
+				{ attributes: { 'payment.id': id, 'payment.source': source } },
+			);
+		return getRequestId() ? observe() : runWithRequestId(undefined, observe);
+	}
+
+	private async recoverPayment(id: string, dueAt?: Date) {
 		this.provider.assertConfigured();
 		const leaseToken = randomUUID();
 		const claimed = await this.claim(id, leaseToken, dueAt);
-		if (!claimed) return;
+		if (!claimed) return 'skipped';
 
 		try {
-			await this.recoverClaim(claimed, leaseToken);
+			return await this.recoverClaim(claimed, leaseToken);
 		} catch (error: unknown) {
 			await this.recordFailure(id, leaseToken, error);
 			if (!(error instanceof PaymentProviderError)) throw error;
+			return 'deferred';
 		} finally {
 			const now = new Date();
 			await updateCurrent(
@@ -111,16 +144,16 @@ export class PaymentRecoveryService {
 		const payment = claimed.providerPaymentId
 			? claimed
 			: await this.prepareCreate(claimed, leaseToken);
-		if (!payment?.leaseUntil || payment.leaseUntil <= new Date()) return;
+		if (!payment?.leaseUntil || payment.leaseUntil <= new Date()) return 'skipped';
 
 		const { id, providerPaymentId, providerRequest, providerIdempotenceKey, firstDispatchedAt } =
 			payment;
-		if (terminalPayment(payment.status) && !payment.needsReview) return;
+		if (terminalPayment(payment.status) && !payment.needsReview) return 'skipped';
 		if (
 			!providerPaymentId &&
 			(!firstDispatchedAt || Date.now() - firstDispatchedAt.getTime() >= CREATE_WINDOW_MS)
 		)
-			return;
+			return 'skipped';
 
 		const snapshot = providerPaymentId
 			? await this.provider.get(providerPaymentId)
@@ -130,6 +163,7 @@ export class PaymentRecoveryService {
 			correlationId: leaseToken,
 			leaseToken,
 		});
+		return 'verified';
 	}
 
 	private async prepareCreate(payment: RecoveryPayment, leaseToken: string) {

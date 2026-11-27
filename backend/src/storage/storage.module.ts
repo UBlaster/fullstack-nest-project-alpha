@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { S3Client } from '@aws-sdk/client-s3';
+import { addS3Propagation } from '../diagnostics/s3-operation';
 import { S3ObjectStorageService } from './s3-object-storage.service';
 import { OBJECT_STORAGE, S3_CLIENT, STORAGE_CONFIG, StorageConfig } from './storage.tokens';
 
@@ -41,15 +42,17 @@ function booleanValue(config: ConfigService, name: string, fallback: boolean): b
 			provide: S3_CLIENT,
 			inject: [ConfigService],
 			useFactory: (config: ConfigService) =>
-				new S3Client({
-					endpoint: required(config, 'S3_ENDPOINT'),
-					region: config.get<string>('S3_REGION') ?? 'ru-central1',
-					forcePathStyle: booleanValue(config, 'S3_FORCE_PATH_STYLE', false),
-					credentials: {
-						accessKeyId: required(config, 'S3_ACCESS_KEY_ID'),
-						secretAccessKey: required(config, 'S3_SECRET_ACCESS_KEY'),
-					},
-				}),
+				addS3Propagation(
+					new S3Client({
+						endpoint: required(config, 'S3_ENDPOINT'),
+						region: config.get<string>('S3_REGION') ?? 'ru-central1',
+						forcePathStyle: booleanValue(config, 'S3_FORCE_PATH_STYLE', false),
+						credentials: {
+							accessKeyId: required(config, 'S3_ACCESS_KEY_ID'),
+							secretAccessKey: required(config, 'S3_SECRET_ACCESS_KEY'),
+						},
+					}),
+				),
 		},
 		S3ObjectStorageService,
 		{

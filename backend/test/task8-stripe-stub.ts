@@ -72,6 +72,7 @@ function formBody(serialized: string): Record<string, unknown> {
 export class StripeStub {
 	readonly creates: StubCreateRequest[] = [];
 	readonly gets: string[] = [];
+	readonly traceHeaders: { traceparent?: string; tracestate?: string }[] = [];
 	readonly payments = new Map<string, StubSession>();
 	private readonly byKey = new Map<string, string>();
 	private readonly bodiesByKey = new Map<string, string>();
@@ -197,6 +198,11 @@ export class StripeStub {
 			this.failure(res, 401);
 			return;
 		}
+		this.traceHeaders.push({
+			traceparent:
+				typeof req.headers.traceparent === 'string' ? req.headers.traceparent : undefined,
+			tracestate: typeof req.headers.tracestate === 'string' ? req.headers.tracestate : undefined,
+		});
 		if (req.method === 'POST' && req.url === '/v1/checkout/sessions') {
 			const chunks: Buffer[] = [];
 			for await (const chunk of req) chunks.push(Buffer.from(chunk));

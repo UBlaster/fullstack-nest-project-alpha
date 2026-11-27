@@ -4,6 +4,11 @@
   "scripts": {
     "dev": "docker compose up --build",
     "build": "npm run build --prefix backend && npm run build --prefix frontend",
-    "test:task9": "node backend/test/task9-acceptance.mjs --run"
+    "test:task9": "node backend/test/task9-acceptance.mjs --run",
+    "obs:up": "node observability/stand-up.mjs",
+    "obs:check": "node observability/verify.mjs",
+    "obs:logs": "npm run --silent obs:compose -- logs --no-color --tail 100 --follow backend worker",
+    "obs:stop": "npm run --silent obs:compose -- stop",
+    "obs:compose": "docker compose -p nest-fullstack-project -f docker-compose.yml -f observability/compose.test.yml"
   }
 }

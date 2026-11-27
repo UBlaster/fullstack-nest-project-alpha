@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { setAuthenticatedContext } from '../diagnostics/request-context';
 import { AccessAction, AccessResource, assertAllowed } from './permissions';
 
 @Injectable()
@@ -26,6 +27,7 @@ export class AccessPolicyService {
 		}
 
 		assertAllowed(membership.role, resource, action);
+		setAuthenticatedContext({ userId: membership.userId, workspaceId: membership.workspaceId });
 		return membership;
 	}
 

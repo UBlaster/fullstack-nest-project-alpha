@@ -102,6 +102,19 @@ describeBackfill('Document body backfill against isolated PostgreSQL', () => {
 		if (target.database !== 'task7_backfill_test' || target.schema !== 'public') {
 			throw new Error('Backfill test database identity did not match its isolated target');
 		}
+		const [columns] = await prisma.$queryRaw<Array<{ releaseA: boolean }>>`
+			SELECT COUNT(*) = 2 AS "releaseA"
+			FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = 'Document' AND data_type = 'text'
+				AND ((column_name = 'content' AND is_nullable = 'NO')
+					OR (column_name = 'body' AND is_nullable = 'YES'))
+		`;
+		if (!columns.releaseA) {
+			throw new Error(
+				'Backfill tests require Release A (Document.content TEXT NOT NULL, Document.body TEXT NULL). ' +
+					'Prepare the isolated database through migration 20261112155553_document_body_expand.',
+			);
+		}
 		// CLI меняет всю таблицу: чужие документы нельзя даже временно включать в этот запуск.
 		if ((await prisma.document.count()) !== 0) {
 			throw new Error('The dedicated backfill database must start without documents');

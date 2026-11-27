@@ -1,3 +1,4 @@
+import { shutdownTelemetry } from '../instrumentation';
 import 'reflect-metadata';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
@@ -5,9 +6,10 @@ import { WorkerModule } from './worker.module';
 import { WorkerRuntimeService } from './worker-runtime.service';
 import { shutdownWorker } from './worker-shutdown';
 import { PaymentMaintenanceService } from '../payments/payment-maintenance.service';
+import { appLogger, logEvent } from '../observability/logger';
 
 async function bootstrap() {
-	const app = await NestFactory.createApplicationContext(WorkerModule);
+	const app = await NestFactory.createApplicationContext(WorkerModule, { logger: appLogger });
 	const runtime = app.get(WorkerRuntimeService);
 	const payments = app.get(PaymentMaintenanceService);
 	runtime.start();
@@ -34,13 +36,12 @@ async function bootstrap() {
 					}
 				},
 			},
-			app,
+			{ close: () => app.close().finally(shutdownTelemetry) },
 		);
 	};
 	const stop = () => {
 		void shutdown().catch((error: unknown) => {
-			const name = error instanceof Error ? error.name : 'UnknownError';
-			console.error(`Worker shutdown failed: ${name}`);
+			logEvent('error', 'worker.shutdown.failed', { error });
 			process.exit(1);
 		});
 	};
@@ -48,4 +49,7 @@ async function bootstrap() {
 	process.once('SIGINT', stop);
 }
 
-void bootstrap();
+void bootstrap().catch((error: unknown) => {
+	logEvent('error', 'worker.bootstrap.failed', { error });
+	process.exitCode = 1;
+});

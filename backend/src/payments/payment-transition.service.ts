@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { Payment, PaymentStatus, Prisma } from '@prisma/client';
+import { logEvent } from '../observability/logger';
+import { withSpan } from '../observability/telemetry';
 import { PrismaService } from '../prisma/prisma.service';
 import {
 	isProviderId,
@@ -131,14 +133,31 @@ export class PaymentTransitionService {
 		snapshot: PaymentProviderSnapshot,
 		context: TransitionContext,
 	): Promise<void> {
+		await withSpan(
+			'payment.transition',
+			async (span) => {
+				const status = await this.commitTransition(id, snapshot, context);
+				span.setAttribute('payment.status', status);
+				logEvent('info', 'payment.transition', { paymentId: id, result: status });
+			},
+			{ attributes: { 'payment.id': id, 'payment.reason': context.reason } },
+		);
+	}
+
+	private async commitTransition(
+		id: string,
+		snapshot: PaymentProviderSnapshot,
+		context: TransitionContext,
+	) {
 		if (context.event && context.event.providerObjectId !== snapshot.id) {
 			throw new PaymentProviderError('PROVIDER_ID_MISMATCH');
 		}
 
 		for (let attempt = 0; attempt < MAX_TRANSACTION_ATTEMPTS; attempt += 1) {
 			try {
-				await this.prisma.$transaction((tx) => this.applyInTransaction(tx, id, snapshot, context));
-				return;
+				return await this.prisma.$transaction((tx) =>
+					this.applyInTransaction(tx, id, snapshot, context),
+				);
 			} catch (error: unknown) {
 				if (error instanceof Prisma.PrismaClientKnownRequestError) {
 					if (error.code === 'P2025' || error.code === 'P2034') continue;
@@ -207,6 +226,7 @@ export class PaymentTransitionService {
 				errorCode: lastErrorCode,
 			});
 		}
+		return status;
 	}
 
 	async recordEvent(

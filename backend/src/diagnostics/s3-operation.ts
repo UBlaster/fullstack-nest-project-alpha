@@ -1,9 +1,43 @@
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { Logger } from '@nestjs/common';
+import { context, createContextKey, SpanKind } from '@opentelemetry/api';
+import type { S3Client } from '@aws-sdk/client-s3';
+import { traceHeaders } from '../observability/carrier';
+import { meter, secondsHistogram, withSpan } from '../observability/telemetry';
 import { getRequestId } from './request-context';
 
 const logger = new Logger('S3Operations');
+const networkCall = createContextKey('s3.networkCall');
+const duration = meter.createHistogram('s3.duration', secondsHistogram);
+const errors = meter.createCounter('s3.errors');
+type S3Operation =
+	| 'PutObject'
+	| 'PresignPutObject'
+	| 'PresignGetObject'
+	| 'DeleteObject'
+	| 'ListObjectsV2'
+	| 'HeadObject'
+	| 'AbortMultipartUpload'
+	| 'CompleteMultipartUpload'
+	| 'UploadPart'
+	| 'CreateMultipartUpload';
+
+export function addS3Propagation(client: S3Client): S3Client {
+	// Build runs before the SDK signs the request. Presigning is local and must never
+	// require a future browser download to replay our trace headers.
+	client.middlewareStack.add(
+		(next) => async (args) => {
+			if (context.active().getValue(networkCall)) {
+				const request = args.request as { headers: Record<string, string> };
+				Object.assign(request.headers, traceHeaders());
+			}
+			return next(args);
+		},
+		{ step: 'build', name: 'workspaceTraceHeaders' },
+	);
+	return client;
+}
 
 function record(value: unknown): Record<string, unknown> {
 	return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
@@ -27,7 +61,7 @@ function integer(
 }
 
 export async function observeS3<T>(
-	operation: string,
+	operation: S3Operation,
 	work: () => Promise<T>,
 	options: { requestId?: string; presign?: boolean } = {},
 ): Promise<T> {
@@ -56,13 +90,25 @@ export async function observeS3<T>(
 			return;
 		}
 	};
-	let result: T;
-	try {
-		result = await work();
-	} catch (error) {
-		log('error', error);
-		throw error;
-	}
-	log('success', result);
-	return result;
+	return withSpan(
+		`s3.${operation}`,
+		async (span) => {
+			span.setAttribute('request.id', requestId);
+			try {
+				const result = await context.with(
+					context.active().setValue(networkCall, !options.presign),
+					work,
+				);
+				log('success', result);
+				return result;
+			} catch (error) {
+				errors.add(1, { operation });
+				log('error', error);
+				throw error;
+			} finally {
+				duration.record((performance.now() - started) / 1000, { operation });
+			}
+		},
+		{ kind: options.presign ? SpanKind.INTERNAL : SpanKind.CLIENT },
+	);
 }

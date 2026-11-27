@@ -1,0 +1,31 @@
+# Task 9 switches the application services to a dedicated database in the existing Compose project.
+x-test-app: &test-app
+  DATABASE_URL: "postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/task9_observability_test"
+  REDIS_URL: redis://redis:6379/9
+  EXPORT_QUEUE_NAME: task9-observability-exports
+  EXPORT_DLQ_NAME: task9-observability-exports-dead
+  S3_ENDPOINT: https://storage.yandexcloud.net
+  S3_REGION: ru-central1
+  S3_BUCKET: "${TASK9_S3_BUCKET:-task9-not-configured}"
+  S3_ACCESS_KEY_ID: "${TASK9_S3_ACCESS_KEY_ID:-task9-not-configured}"
+  S3_SECRET_ACCESS_KEY: "${TASK9_S3_SECRET_ACCESS_KEY:-task9-not-configured}"
+  S3_FORCE_PATH_STYLE: "true"
+  TASK9_ENABLE_YANDEX_EXPORT: "${TASK9_S3_BUCKET:+true}"
+  PAYMENT_MODE: test
+  STRIPE_SECRET_KEY: ""
+  STRIPE_WEBHOOK_SECRET: ""
+  OTEL_METRIC_EXPORT_INTERVAL: "5000"
+services:
+  db-init:
+    command: ["npx", "--no-install", "prisma", "migrate", "deploy"]
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/task9_observability_test"
+  backend:
+    command: ["node", "-r", "ts-node/register", "src/main.ts"]
+    environment:
+      <<: *test-app
+      JWT_SECRET: task9-isolated-local-only
+      BCRYPT_ROUNDS: "4"
+      CACHE_ENABLED: "true"
+  worker:
+    environment: *test-app

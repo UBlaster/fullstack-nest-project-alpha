@@ -50,6 +50,10 @@ describeBackfillGuard('Document body backfill generated-client guard (no databas
 		);
 	});
 
+	it('rejects the generated Prisma Client for Release D', () => {
+		expect(() => assertReleaseAClient()).toThrow('BACKFILL_REQUIRES_RELEASE_A_CLIENT');
+	});
+
 	it('fails closed when Document metadata is missing', () => {
 		expect(() => assertReleaseAClient([])).toThrow('BACKFILL_REQUIRES_RELEASE_A_CLIENT');
 	});
