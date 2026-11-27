@@ -1,84 +1,30 @@
-# Старт Task 9 на готовой Task 8
+# Старт Task 10 на готовой Task 9
 
 ## Checkout и база
 
-- Ветка `feature/task-9-start`, проверенная стартовая база — `115bb88`.
-  Готовая Task 8 со Stripe и SSE входит через `63d02ee`; Task 9 предстоит реализовать.
-  Стартовая Task 8 основана на завершённой Task 7 (`95329e4`).
-- Task 8 теперь допускает одного провайдера на выбор: Stripe или ЮKassa.
-  Текущее решение использует только Stripe в тестовом режиме.
-- Материалы следующего задания: tasks/09-opentelemetry-logs-traces-and-metrics.md
-  и guides/09-observability-logs-traces-and-metrics-primer.md из набора заданий.
+- Ветка `feature/task-10-start`. Проверенная база после Task 9 — `0870040fe82de90e948ae52c14cea167cecd86a0`.
+- Материалы в Obsidian: tasks/10-versioned-document-pipeline-and-hybrid-ai-search.md
+  и guides/10-document-pipelines-embeddings-and-hybrid-search-primer.md.
 
 ## Контракты базы
 
-- Nest feature modules/DI, Controller → Service → PrismaService, PostgreSQL/Prisma,
-  React/Vite, JWT и отдельный workspace access layer. Роли OWNER/MEMBER/VIEWER;
-  платежи доступны OWNER, outsider получает 404, MEMBER/VIEWER — 403.
-- Схема кода после Task 7 использует обязательный Document.body, JSON/DTO — content.
-  Redis остаётся metadata cache, экспорт — RabbitMQ/amqplib + outbox/worker.
-  Исходные migrations Task 7 и прежняя payment migration не переписывались.
+- Nest feature modules, Prisma/PostgreSQL 16; обязательный Document.body, DTO content.
+  Права и workspace isolation проверяются через access policy.
+- READY-файлы документов в Yandex Object Storage. Redis обслуживает cache-aside.
+  RabbitMQ/amqplib и transactional outbox обслуживают экспорты с confirms и manual ACK.
+- Task 9: очищенные JSON-логи Pino и контекст OpenTelemetry проходят через Collector
+  в Loki/Jaeger; Grafana читает оба источника, Prometheus собирает метрики Collector.
+  API и worker передают W3C контекст через RabbitMQ. `obs:up` использует группу
+  `nest-fullstack-project` с тестовой БД `task9_observability_test`.
 
-## Реализованное поведение
+## Задача и проверки
 
-- Stripe SDK 23.1.0, API 2026-10-28.endive; Hosted Checkout, card-only через
-  allowed_payment_method_types. WORKSPACE_DEMO стоит 1000 minor units USD.
-  Карточные данные вводятся у Stripe, frontend открывает готовый URL Session.
-- Payment.provider добавлен новой migration: существующие операции — yookassa,
-  новые — stripe. Legacy история доступна, её checkout URL скрыт; Stripe recovery,
-  webhook binding и maintenance не обрабатывают операции старого провайдера.
-- Локальный user/key отделён от сохранённых provider UUID/body. Reservation до HTTP;
-  request hash включает provider и цену. Повтор сохраняет исходные key/body/return URLs.
-- Проверка Snapshot: test mode, Session ID, mode, сумма/валюта, metadata/client reference.
-  complete+paid — успех; expired+unpaid — отмена; complete+unpaid остаётся pending
-  без старой checkout-ссылки. Возврат/закрытие страницы не назначает status.
-- Webhook: raw bytes + Stripe-Signature SDK verification до GET/DB, затем собственный
-  authenticated GET Session и общий transition service. CAS/audit атомарны, terminal
-  не откатывается; event dedup — provider/eventType/Session ID.
-- Recovery неизвестного ID повторяет POST лишь до 23 часов от первого dispatch;
-  позже needsReview без нового POST. Известный ID проверяется GET. Stripe может
-  повторить сохранённый 500, поэтому replay не гарантирует восстановление ID.
-- Payment/event leases учитывают SDK transport retry budget и SQL-запас.
-  Сверка работает в существующем worker, без новой очереди или контейнера.
-- Публичные поля выбираются явно. Capabilities отдаёт enabled/provider/цену без secrets;
-  frontend форматирует цену, сохраняет попытки и восстанавливает login return.
-  Unknown попытка автоматически не получает новый ключ.
-- GET /payments/:id/events с Bearer и проверкой доступа отправляет свежий публичный
-  слепок, затем изменения из общей БД через 2 секунды после предыдущего чтения.
-  Timestamp-only writes не отправляются. Stop: terminal/needsReview/disconnect/5 минут.
-  PaymentDetails использует fetch SSE с двумя reconnect через 1 и 2 секунды в общем
-  окне 5 минут, без повторов HTTP 4xx и без HTTP polling. Ручной GET и POST reconcile сохранены.
-- Workspace с платежами: hard delete — 409/WORKSPACE_HAS_PAYMENTS, archive допустим.
-
-## Проверки и оставшиеся ограничения
-
-- Целевые проверки готового решения: backend 117 PASS, frontend 44 PASS; types,
-  scoped lint/format и diff-check прошли. Полный прежний backend-набор не запускался.
-- Общий набор с замоканным провайдером проверен на Stripe: 12 PASS. Он использует
-  тестовые JWT, PostgreSQL и HTTP API. Записи выполнялись только в task8_stripe_test.
-- Общий набор backend/test/task8-payment-contract.e2e-spec.ts использует PaymentProviderMock
-  для общих сценариев. Цена берётся из обычного создания, событие поступает прямо
-  в обработчик бизнес-событий. SSE, подписи и протоколы покрывают отдельные тесты Task 9.
-- Подключение Nest DI и преобразование снимков находятся в task8-payment-contract.binding.ts.
-  Ученики заполняют только эту тестовую точку подключения для своего провайдера.
-  Запуск: TASK8_CONTRACT_TESTS=true, TASK8_CONTRACT_DATABASE_URL указывает на выделенную
-  локальную БД с миграциями Task 8, затем Jest с выбором task8-payment-contract.e2e-spec.ts.
-- SQL проверки использовали отдельную task8_stripe_test в существующем PostgreSQL;
-  HTTP adapter — официальный SDK с управляемым test-only stub, не реальный Stripe.
-  Проверено сохранение legacy Payment и default stripe при новой migration.
-- Настоящий Stripe Checkout и подписанный webhook ранее проверены на отдельной БД;
-  при подготовке стартовых веток живая оплата не повторялась. Для локальных webhook
-  нужен работающий Stripe CLI listener, secrets остаются в игнорируемом env.
-- Локальная workspace_docs всё ещё отличается от D-схемы документов: body nullable,
-  content сохранён, VALIDATE/NOT NULL/DROP не применены из-за 555 групп дублирующихся ID
-  и неконсистентного Document_pkey. Не продолжать contract/backfill до отдельного ремонта.
-  Это ограничение локальной БД, не исправление данных в рамках Stripe-интеграции.
-
-## Приёмка Task 9
-
-- `npm run test:task9` запускает отдельную HTTP-проверку на работающем тестовом стенде
-  с отключённым Stripe. По умолчанию используются API 3000, Grafana 3001, Jaeger 16686
-  и Prometheus 9090 на loopback. Доступны конечные адреса `TASK9_API_URL`,
-  `TASK9_GRAFANA_URL`, `TASK9_JAEGER_URL` и `TASK9_PROMETHEUS_URL`.
-- Тест проверяет корреляцию и безопасность телеметрии для 200/404/503 и счётчики
-  HTTP. Он запускается отдельно от обычного Jest. Остальные сценарии — в Task/Guide 9.
+- Предстоит добавить versioned document pipeline и гибридный поиск по активным версиям.
+  Сохранять текущую версию при сбое, проверять права и фильтровать кандидатов до LIMIT.
+- Базовый Jest запускается обычной командой `npm run test:e2e --prefix backend`
+  на выделенной тестовой БД. `npm run test:task9` проверяет готовую Task 9 на стенде.
+- `npm run test:task10 -- --fixtures` показывает входы для приёмки. После реализации
+  `npm run test:task10` запускает отдельный HTTP-контракт с `TASK10_CONTRACT_TESTS=true`,
+  тестовыми авторизациями и подготовленными READY-файлами в двух workspace.
+  Сценарий отказа новой версии включается указанием `TASK10_REJECTED_FILE_ID`.
+  Имена переменных и требования к фикстурам указаны в тесте.
