@@ -47,6 +47,33 @@ enum ExportJobStatus {
 
 enum OutboxEventType {
   EXPORT_REQUESTED
+  PIPELINE_STAGE
+}
+
+enum DocumentVersionStatus {
+  UPLOADED
+  EXTRACTING
+  NORMALIZING
+  CHUNKING
+  EMBEDDING
+  INDEXED
+  FAILED
+}
+
+enum PipelineStage {
+  EXTRACT
+  NORMALIZE
+  CHUNK
+  EMBED
+  INDEX
+  ACTIVATE
+}
+
+enum PipelineRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
 }
 
 enum PaymentStatus {
@@ -117,17 +144,20 @@ model Project {
 }
 
 model Document {
-  id        String         @id @default(cuid())
-  projectId String
-  authorId  String
-  title     String
-  body      String
-  status    DocumentStatus @default(DRAFT)
-  createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
-  project   Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  author    User           @relation(fields: [authorId], references: [id], onDelete: Restrict)
-  files     DocumentFile[]
+  id               String            @id @default(cuid())
+  projectId        String
+  authorId         String
+  title            String
+  body             String
+  status           DocumentStatus    @default(DRAFT)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  project          Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  author           User              @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  files            DocumentFile[]
+  versions         DocumentVersion[] @relation("DocumentVersions")
+  currentVersionId String?           @unique
+  currentVersion   DocumentVersion?  @relation("CurrentVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
 
   @@index([projectId])
   @@index([authorId])
@@ -146,9 +176,95 @@ model DocumentFile {
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
   document     Document           @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  versions     DocumentVersion[]
 
   @@index([documentId])
   @@index([status, createdAt])
+}
+
+model DocumentVersion {
+  id              String                @id @default(cuid())
+  documentId      String
+  version         Int
+  sourceFileId    String
+  contentHash     String
+  pipelineVersion String
+  requestedById   String
+  status          DocumentVersionStatus @default(UPLOADED)
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  document        Document              @relation("DocumentVersions", fields: [documentId], references: [id], onDelete: Cascade)
+  currentFor      Document?             @relation("CurrentVersion")
+  sourceFile      DocumentFile          @relation(fields: [sourceFileId], references: [id], onDelete: NoAction)
+  stages          PipelineStageRun[]
+  chunks          DocumentChunk[]
+  parts           DocumentTextPart[]
+
+  @@unique([documentId, version])
+  @@unique([documentId, contentHash])
+  @@index([sourceFileId])
+}
+
+model PipelineStageRun {
+  id          String            @id @default(cuid())
+  versionId   String
+  stage       PipelineStage
+  inputHash   String
+  status      PipelineRunStatus @default(PENDING)
+  attempts    Int               @default(0)
+  dispatch    Int               @default(0)
+  errorCode   String?
+  claimToken  String?
+  heartbeatAt DateTime?
+  completedAt DateTime?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  version     DocumentVersion   @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@unique([versionId, stage, inputHash])
+  @@index([status, heartbeatAt])
+}
+
+model DocumentTextPart {
+  versionId String
+  stage     PipelineStage
+  partIndex Int
+  text      String
+  version   DocumentVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@id([versionId, stage, partIndex])
+}
+
+model DocumentChunk {
+  id         String              @id @default(cuid())
+  versionId  String
+  chunkIndex Int
+  text       String
+  tokenCount Int
+  textHash   String
+  version    DocumentVersion     @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  embeddings DocumentEmbedding[]
+
+  @@unique([versionId, chunkIndex])
+}
+
+model DocumentEmbedding {
+  id               String                      @id @default(cuid())
+  chunkId          String
+  embeddingVersion String
+  model            String
+  dimension        Int
+  status           String                      @default("READY")
+  embedding        Unsupported("vector(1024)")
+  chunk            DocumentChunk               @relation(fields: [chunkId], references: [id], onDelete: Cascade)
+
+  @@unique([chunkId, embeddingVersion])
+}
+
+model EmbeddingReadConfig {
+  id               String   @id
+  embeddingVersion String
+  writeVersions    String[]
 }
 
 model ExportJob {

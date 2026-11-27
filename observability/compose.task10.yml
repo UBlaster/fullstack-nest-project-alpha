@@ -1,0 +1,51 @@
+# Use existing services and volumes of nest-fullstack-project. Only the test database and queue names are dedicated.
+x-pipeline-test: &pipeline-test
+  DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/task10_pipeline_test
+  S3_ENDPOINT: https://storage.yandexcloud.net
+  S3_REGION: ru-central1
+  S3_FORCE_PATH_STYLE: "true"
+  EMBEDDING_PROVIDER: fake
+  EMBEDDING_NEXT_PROVIDER: fake
+  EMBEDDING_VERSION: v1
+  EMBEDDING_NEXT_VERSION: v2
+  EMBEDDING_DIMENSION: "1024"
+  VOYAGE_API_KEY: ""
+  STRIPE_SECRET_KEY: ""
+  STRIPE_WEBHOOK_SECRET: ""
+  EXPORT_QUEUE_NAME: task10-exports
+  EXPORT_DLQ_NAME: task10-exports-dead
+  EXPORT_OUTBOX_POLL_MS: "150"
+  PIPELINE_QUEUE_NAME: task10-pipeline-stages
+  PIPELINE_RETRY_BACKOFF_MS: "150"
+  PIPELINE_LEASE_MS: "15000"
+  OTEL_METRIC_EXPORT_INTERVAL: "2000"
+services:
+  db-init:
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/task10_pipeline_test
+    command: ["npx", "--no-install", "prisma", "migrate", "deploy"]
+    volumes: ["./backend/prisma:/app/prisma:ro"]
+  backend:
+    image: nest-fullstack-project-backend-fixtures
+    build: { context: ./backend, dockerfile: Dockerfile }
+    environment:
+      <<: *pipeline-test
+      REDIS_URL: redis://redis:6379/10
+      BCRYPT_ROUNDS: "4"
+    command: ["node", "dist/src/main.js"]
+    volumes: !override ["./backend/test:/app/test:ro"]
+  worker:
+    image: nest-fullstack-project-worker-fixtures
+    build: { context: ./backend, dockerfile: Dockerfile }
+    environment: *pipeline-test
+    command: ["node", "dist/src/worker/worker.js"]
+    volumes: !reset []
+  frontend:
+    image: nest-fullstack-project-frontend-fixtures
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args: { VITE_API_URL: "http://localhost:3000" }
+    ports: !override ["127.0.0.1:5173:80"]
+    volumes: !reset []
+    command: ["nginx", "-g", "daemon off;"]

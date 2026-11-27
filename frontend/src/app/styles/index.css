@@ -127,6 +127,16 @@ button:focus-visible {
 .doc span {
 	color: #687386;
 }
+.document-search-result {
+	flex-direction: column;
+	gap: 6px;
+	overflow-wrap: anywhere;
+}
+#workspace-search-mode {
+	max-width: 100%;
+	padding: 6px;
+	font: inherit;
+}
 .section-heading {
 	display: flex;
 	align-items: center;

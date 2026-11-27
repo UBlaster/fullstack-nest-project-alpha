@@ -11,10 +11,15 @@ import {
 	ExportQueuePayload,
 	exportQueueAttempts,
 	exportQueueBackoffMs,
+	PipelineDestination,
+	PipelineJob,
+	pipelineRetries,
+	parsePipelineJob,
 } from './queue.constants';
 
 type Destination = 'ready' | 'retry' | 'lease' | 'dead';
 const publications = meter.createCounter('export.queue.publications');
+const pipelinePublications = meter.createCounter('pipeline.queue.publications');
 
 @Injectable()
 export class QueueService implements OnModuleDestroy {
@@ -23,6 +28,11 @@ export class QueueService implements OnModuleDestroy {
 	readonly deadQueueName: string;
 	readonly leaseQueueName: string;
 	readonly retryQueueNames: string[];
+	readonly pipelineQueueName: string;
+	readonly pipelineDeadQueueName: string;
+	readonly pipelineRetryQueueNames: string[];
+	private readonly pipelineBackoffMs: number;
+	private pipelineTopology?: { channel: ConfirmChannel; ready: Promise<void> };
 	private readonly url: string;
 	private readonly timeoutMs: number;
 	private readonly backoffMs: number;
@@ -44,17 +54,27 @@ export class QueueService implements OnModuleDestroy {
 			{ length: exportQueueAttempts - 1 },
 			(_, index) => `${this.queueName}-retry-${index + 1}`,
 		);
+		this.pipelineQueueName =
+			config.get<string>('PIPELINE_QUEUE_NAME') ?? `${this.queueName}-pipeline`;
+		this.pipelineDeadQueueName = `${this.pipelineQueueName}-dead`;
+		this.pipelineRetryQueueNames = Array.from(
+			{ length: pipelineRetries },
+			(_, index) => `${this.pipelineQueueName}-retry-${index + 1}`,
+		);
 		const names = [
 			this.queueName,
 			this.deadQueueName,
 			this.leaseQueueName,
 			...this.retryQueueNames,
+			this.pipelineQueueName,
+			this.pipelineDeadQueueName,
+			...this.pipelineRetryQueueNames,
 		];
-		if (new Set(names).size !== names.length)
-			throw new Error('Export queue names must be distinct');
+		if (new Set(names).size !== names.length) throw new Error('Queue names must be distinct');
 		this.timeoutMs = this.positiveInteger(config, 'RABBITMQ_TIMEOUT_MS', 5_000);
 		this.backoffMs = this.positiveInteger(config, 'EXPORT_RETRY_BACKOFF_MS', exportQueueBackoffMs);
 		this.leaseDelayMs = this.positiveInteger(config, 'EXPORT_LEASE_DELAY_MS', 2_000);
+		this.pipelineBackoffMs = this.positiveInteger(config, 'PIPELINE_RETRY_BACKOFF_MS', 1_000);
 	}
 
 	addExport(payload: ExportQueuePayload, queueJobId: string): Promise<void> {
@@ -79,8 +99,67 @@ export class QueueService implements OnModuleDestroy {
 		return this.publish('dead', this.deadQueueName, payload, `dead-${payload.sourceQueueJobId}`, 0);
 	}
 
-	async createConsumerChannel(): Promise<Channel> {
-		await this.getPublisher();
+	async publishPipeline(
+		delivery: PipelineDestination,
+		job: PipelineJob,
+		messageId: string,
+		retryNumber = 0,
+		errorCode?: string,
+	): Promise<void> {
+		const clean = parsePipelineJob(job);
+		if (delivery === 'dead') {
+			const allowed = [
+				'RETRIES_EXHAUSTED',
+				'MEMBERSHIP_REVOKED',
+				'INVALID_SOURCE',
+				'INVALID_EMBEDDING',
+			];
+			return this.publish(
+				'dead',
+				this.pipelineDeadQueueName,
+				{
+					documentVersionId: clean.documentVersionId,
+					stage: clean.stage,
+					errorCode: errorCode && allowed.includes(errorCode) ? errorCode : 'FAILED',
+				},
+				messageId,
+				retryNumber,
+				true,
+			);
+		}
+		const queue =
+			delivery === 'retry' ? this.pipelineRetryQueueNames[retryNumber - 1] : this.pipelineQueueName;
+		if (
+			!queue ||
+			!Number.isInteger(retryNumber) ||
+			retryNumber < 0 ||
+			retryNumber > pipelineRetries
+		)
+			throw new Error('InvalidPipelineRetry');
+		return this.publish(
+			delivery === 'retry' ? 'retry' : 'ready',
+			queue,
+			clean,
+			messageId,
+			retryNumber,
+			true,
+		);
+	}
+
+	quarantinePipelineMessage(): Promise<void> {
+		return this.publish(
+			'dead',
+			this.pipelineDeadQueueName,
+			{ errorCode: 'INVALID_MESSAGE' },
+			randomUUID(),
+			0,
+			true,
+		);
+	}
+
+	async createConsumerChannel(pipeline = false): Promise<Channel> {
+		const publisher = await this.getPublisher();
+		if (pipeline) await this.ensurePipelineTopology(publisher);
 		const connection = this.connection;
 		const abort = this.connectionAbort;
 		if (!connection || !abort) throw new Error('RabbitMQUnavailable');
@@ -115,28 +194,38 @@ export class QueueService implements OnModuleDestroy {
 	private publish(
 		destination: Destination,
 		queue: string,
-		payload: ExportQueuePayload | ExportDeadLetterPayload,
+		payload: object,
 		messageId: string,
 		attemptsMade: number,
+		pipeline = false,
 	): Promise<void> {
 		return withSpan(
 			'rabbitmq.publish',
 			async () => {
-				await this.sendConfirmed(queue, payload, messageId, attemptsMade);
-				publications.add(1, { destination });
+				await this.sendConfirmed(queue, payload, messageId, attemptsMade, pipeline);
+				(pipeline ? pipelinePublications : publications).add(1, { destination });
 				logEvent('info', 'rabbitmq.publish', { result: destination });
 			},
-			{ kind: SpanKind.PRODUCER, attributes: { 'messaging.system': 'rabbitmq', destination } },
+			{
+				kind: SpanKind.PRODUCER,
+				attributes: {
+					'messaging.system': 'rabbitmq',
+					'messaging.destination.name': queue,
+					destination,
+				},
+			},
 		);
 	}
 
 	private async sendConfirmed(
 		queue: string,
-		payload: ExportQueuePayload | ExportDeadLetterPayload,
+		payload: object,
 		messageId: string,
 		attemptsMade: number,
+		pipeline: boolean,
 	): Promise<void> {
 		const channel = await this.getPublisher();
+		if (pipeline) await this.ensurePipelineTopology(channel);
 		const connectionAbort = this.connectionAbort;
 		const correlationId = randomUUID();
 		const publication = { returned: false };
@@ -149,8 +238,8 @@ export class QueueService implements OnModuleDestroy {
 			correlationId,
 			headers: {
 				...messageHeaders(),
-				'x-export-attempts': attemptsMade,
-				'x-export-sent-ms': Date.now(),
+				[pipeline ? 'x-pipeline-retry' : 'x-export-attempts']: attemptsMade,
+				[pipeline ? 'x-pipeline-sent-ms' : 'x-export-sent-ms']: Date.now(),
 			},
 		};
 		await new Promise<void>((resolve, reject) => {
@@ -236,28 +325,44 @@ export class QueueService implements OnModuleDestroy {
 		}
 	}
 
-	private async assertTopology(channel: ConfirmChannel): Promise<void> {
+	private ensurePipelineTopology(channel: ConfirmChannel): Promise<void> {
+		if (this.pipelineTopology?.channel === channel) return this.pipelineTopology.ready;
+		const abort = this.connectionAbort;
+		if (!abort) throw new Error('RabbitMQUnavailable');
+		const ready = this.withTimeout(this.assertTopology(channel, true), abort).catch((error) => {
+			if (this.pipelineTopology?.channel === channel) this.pipelineTopology = undefined;
+			throw error;
+		});
+		this.pipelineTopology = { channel, ready };
+		return ready;
+	}
+
+	private async assertTopology(channel: ConfirmChannel, pipeline = false): Promise<void> {
+		const ready = pipeline ? this.pipelineQueueName : this.queueName;
+		const dead = pipeline ? this.pipelineDeadQueueName : this.deadQueueName;
+		const retries = pipeline ? this.pipelineRetryQueueNames : this.retryQueueNames;
+		const baseDelay = pipeline ? this.pipelineBackoffMs : this.backoffMs;
 		const quorum = {
 			durable: true,
 			arguments: { 'x-queue-type': 'quorum', 'x-delivery-limit': -1 },
 		};
-		await channel.assertQueue(this.queueName, quorum);
-		await channel.assertQueue(this.deadQueueName, quorum);
+		await channel.assertQueue(ready, quorum);
+		await channel.assertQueue(dead, quorum);
 		const delayed = (ttl: number) => ({
 			durable: true,
 			arguments: {
 				...quorum.arguments,
 				'x-message-ttl': ttl,
 				'x-dead-letter-exchange': '',
-				'x-dead-letter-routing-key': this.queueName,
+				'x-dead-letter-routing-key': ready,
 				'x-dead-letter-strategy': 'at-least-once',
 				'x-overflow': 'reject-publish',
 			},
 		});
-		for (const [index, name] of this.retryQueueNames.entries()) {
-			await channel.assertQueue(name, delayed(this.backoffMs * 2 ** index));
+		for (const [index, name] of retries.entries()) {
+			await channel.assertQueue(name, delayed(baseDelay * 2 ** index));
 		}
-		await channel.assertQueue(this.leaseQueueName, delayed(this.leaseDelayMs));
+		if (!pipeline) await channel.assertQueue(this.leaseQueueName, delayed(this.leaseDelayMs));
 	}
 
 	private async withTimeout<T>(operation: Promise<T>, abort: AbortController): Promise<T> {

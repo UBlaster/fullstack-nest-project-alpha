@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
 import {
 	AbortMultipartUploadCommand,
 	CompleteMultipartUploadCommand,
@@ -48,6 +49,17 @@ export class S3ObjectStorageService implements ObjectStorageService, OnModuleDes
 		@Inject(S3_CLIENT) private readonly s3: S3Client,
 		@Inject(STORAGE_CONFIG) private readonly config: StorageConfig,
 	) {}
+
+	async readStream(objectKey: string, signal?: AbortSignal): Promise<Readable> {
+		const timeout = AbortSignal.timeout(120_000);
+		const object = await observeS3('GetObject', () =>
+			this.s3.send(new GetObjectCommand({ Bucket: this.config.bucket, Key: objectKey }), {
+				abortSignal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+			}),
+		);
+		if (!(object.Body instanceof Readable)) throw new Error('MissingObjectStream');
+		return object.Body;
+	}
 
 	createUploadUrl(input: {
 		objectKey: string;

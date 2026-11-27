@@ -198,34 +198,26 @@ export class DocumentFilesService {
 
 	async remove(userId: string, documentId: string, fileId: string): Promise<void> {
 		await this.accessPolicy.requireDocument(userId, documentId, 'update');
-		let file = await this.prisma.documentFile.findFirst({
-			where: { id: fileId, documentId },
-		});
-		if (!file) {
-			const belongsToAnotherDocument = await this.prisma.documentFile.findUnique({
-				where: { id: fileId },
-				select: { id: true },
-			});
-			if (belongsToAnotherDocument) throw new NotFoundException();
-			return;
-		}
-		while (file.status !== DocumentFileStatus.DELETING) {
-			const transition = await this.prisma.documentFile.updateMany({
-				where: {
-					id: file.id,
-					documentId,
-					objectKey: file.objectKey,
-					status: file.status,
-				},
-				data: { status: DocumentFileStatus.DELETING },
-			});
-			if (transition.count === 1) break;
-			const current = await this.prisma.documentFile.findFirst({
-				where: { id: fileId, documentId },
-			});
+		const file = await this.prisma.$transaction(async (tx) => {
+			// Ingest locks this same row before attaching a READY source to a version.
+			// Serialize the reference check and DELETING transition before removing bytes.
+			const [current] = await tx.$queryRaw<
+				Pick<DocumentFile, 'id' | 'documentId' | 'objectKey' | 'status'>[]
+			>`SELECT id, "documentId", "objectKey", status FROM "DocumentFile" WHERE id=${fileId} FOR UPDATE`;
 			if (!current) return;
-			file = current;
-		}
+			if (current.documentId !== documentId) throw new NotFoundException();
+			if (await tx.documentVersion.count({ where: { sourceFileId: fileId } })) {
+				throw new ConflictException('File is used by a document version');
+			}
+			if (current.status !== DocumentFileStatus.DELETING) {
+				await tx.documentFile.update({
+					where: { id: fileId },
+					data: { status: DocumentFileStatus.DELETING },
+				});
+			}
+			return current;
+		});
+		if (!file) return;
 		await this.storage.remove(file.objectKey);
 		await this.prisma.documentFile.deleteMany({
 			where: { id: file.id, documentId, objectKey: file.objectKey },

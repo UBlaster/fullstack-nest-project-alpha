@@ -4,6 +4,7 @@ import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { WorkerModule } from './worker.module';
 import { WorkerRuntimeService } from './worker-runtime.service';
+import { PipelineWorkerService } from './pipeline-worker.service';
 import { shutdownWorker } from './worker-shutdown';
 import { PaymentMaintenanceService } from '../payments/payment-maintenance.service';
 import { appLogger, logEvent } from '../observability/logger';
@@ -11,8 +12,10 @@ import { appLogger, logEvent } from '../observability/logger';
 async function bootstrap() {
 	const app = await NestFactory.createApplicationContext(WorkerModule, { logger: appLogger });
 	const runtime = app.get(WorkerRuntimeService);
+	const pipeline = app.get(PipelineWorkerService);
 	const payments = app.get(PaymentMaintenanceService);
 	runtime.start();
+	pipeline.start();
 	payments.start();
 	new Logger('Release').log(
 		JSON.stringify({
@@ -30,7 +33,11 @@ async function bootstrap() {
 		await shutdownWorker(
 			{
 				close: async () => {
-					const results = await Promise.allSettled([payments.stop(), runtime.close()]);
+					const results = await Promise.allSettled([
+						payments.stop(),
+						runtime.close(),
+						pipeline.close(),
+					]);
 					if (results.some((result) => result.status === 'rejected')) {
 						throw new Error('Worker runtime shutdown failed');
 					}

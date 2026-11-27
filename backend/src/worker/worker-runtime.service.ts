@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ExportJobStatus } from '@prisma/client';
 import { Channel, ConsumeMessage } from 'amqplib';
@@ -14,6 +14,7 @@ import { ExportDatabaseError, ExportLeaseLostError, PermanentExportError } from 
 import { PrismaService } from '../prisma/prisma.service';
 import { ExportQueueJob, exportQueueAttempts } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
+import { RabbitConsumer } from '../queue/rabbit-consumer';
 
 type Disposition = 'completed' | 'cancelled' | 'retry' | 'deferred' | 'dead';
 const processing = meter.createHistogram('export.queue.processing', secondsHistogram);
@@ -24,12 +25,7 @@ const gauges = [queueDepth, oldestAge];
 
 @Injectable()
 export class WorkerRuntimeService {
-	private readonly logger = new Logger(WorkerRuntimeService.name);
-	private readonly pending = new Set<Promise<void>>();
-	private channel?: Channel;
-	private consumerTag?: string;
-	private reconnectTimer?: NodeJS.Timeout;
-	private connecting?: Promise<void>;
+	private readonly consumer: RabbitConsumer;
 	private stopping = true;
 	private readingGauges = false;
 
@@ -39,98 +35,27 @@ export class WorkerRuntimeService {
 		private readonly maintenance: ExportMaintenanceService,
 		private readonly prisma: PrismaService,
 		private readonly queues: QueueService,
-	) {}
+	) {
+		this.consumer = new RabbitConsumer(
+			this.queues.queueName,
+			() => this.queues.createConsumerChannel(),
+			(channel, message) => this.consumeMessage(channel, message),
+		);
+	}
 
 	start(): void {
 		if (!this.stopping) return;
 		this.stopping = false;
 		meter.addBatchObservableCallback(this.observeBacklog, gauges);
 		this.maintenance.start();
-		this.connect();
-	}
-
-	private connect(): void {
-		if (this.stopping || this.connecting || this.channel) return;
-		this.connecting = this.consume()
-			.catch(() => {
-				this.logger.warn('RabbitMQ consumer unavailable; reconnecting');
-				this.scheduleReconnect();
-			})
-			.finally(() => {
-				this.connecting = undefined;
-			});
-	}
-
-	private async consume(): Promise<void> {
-		await Promise.allSettled([...this.pending]);
-		if (this.stopping) return;
-		const channel = await this.queues.createConsumerChannel();
-		let closed = false;
-		channel.on('error', () => this.logger.warn('RabbitMQ consumer channel error'));
-		channel.on('close', () => {
-			closed = true;
-			if (this.channel === channel) {
-				this.channel = undefined;
-				this.consumerTag = undefined;
-				this.scheduleReconnect();
-			}
-		});
-		this.channel = channel;
-		try {
-			await channel.prefetch(2);
-			if (closed) throw new Error('RabbitMQConsumerClosed');
-			if (this.stopping) {
-				await channel.close();
-				return;
-			}
-			const consumer = await channel.consume(
-				this.queues.queueName,
-				(message) => {
-					if (!message) {
-						void channel.close().catch(() => {});
-						return;
-					}
-					if (this.stopping || closed) return;
-					const pending = this.consumeMessage(channel, message).catch(() => {
-						this.logger.warn('RabbitMQ delivery unfinished; requeueing on channel close');
-						return channel.close().catch(() => {});
-					});
-					this.pending.add(pending);
-					void pending.finally(() => this.pending.delete(pending));
-				},
-				{ noAck: false },
-			);
-			if (closed) throw new Error('RabbitMQConsumerClosed');
-			this.consumerTag = consumer.consumerTag;
-		} catch (error) {
-			await channel.close().catch(() => {});
-			throw error;
-		}
-	}
-
-	private scheduleReconnect(): void {
-		if (this.stopping || this.reconnectTimer) return;
-		this.reconnectTimer = setTimeout(() => {
-			this.reconnectTimer = undefined;
-			this.connect();
-		}, 1_000);
-		this.reconnectTimer.unref();
+		this.consumer.start();
 	}
 
 	async close(force = false): Promise<void> {
 		this.stopping = true;
 		meter.removeBatchObservableCallback(this.observeBacklog, gauges);
-		if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-		this.reconnectTimer = undefined;
-		await this.connecting;
-		const channel = this.channel;
-		if (channel && this.consumerTag) await channel.cancel(this.consumerTag).catch(() => {});
-		if (force) await channel?.close().catch(() => {});
-		await Promise.allSettled([...this.pending]);
+		await this.consumer.close(force);
 		await this.maintenance.stop();
-		if (!force) await channel?.close().catch(() => {});
-		this.channel = undefined;
-		this.consumerTag = undefined;
 	}
 
 	private readonly observeBacklog = async (result: BatchObservableResult) => {

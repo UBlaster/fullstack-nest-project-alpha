@@ -99,6 +99,8 @@ export function logEvent(
 		'instance',
 		'paymentId',
 		'exportJobId',
+		'documentVersionId',
+		'stage',
 	]) {
 		if (safeRequestId(fields[key])) entry[key] = fields[key];
 	}

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, uploadToPresignedUrl } from '../../../shared/api';
 import { Layout } from '../../../widgets/layout';
+import { useDocumentVersions } from './useDocumentVersions';
 
 interface DocumentFile {
 	id: string;
@@ -49,7 +50,12 @@ function formatBytes(bytes: number): string {
 
 export function DocumentPage() {
 	const { id } = useParams();
-	const [doc, setDoc] = useState<any>();
+	return id ? <DocumentDetails key={id} id={id} /> : null;
+}
+
+function DocumentDetails({ id }: { id: string }) {
+	const [doc, setDoc] = useState<{ id: string; projectId: string }>();
+	const indexing = useDocumentVersions(id);
 	const [title, setTitle] = useState('');
 	const [content, setContent] = useState('');
 	const [error, setError] = useState('');
@@ -155,19 +161,23 @@ export function DocumentPage() {
 
 			<section className="card files-section">
 				<h2>Файлы документа</h2>
-				<p className="muted">TXT, Markdown, PDF или CSV — максимум 25 МБ.</p>
+				<p className="muted">
+					TXT, Markdown, PDF или CSV до 25 МБ. После загрузки файл обрабатывается как новая версия
+					документа для поиска.
+				</p>
 				{capabilities.canManageFiles && (
 					<input
 						type="file"
 						accept=".txt,.md,.markdown,.pdf,.csv"
-						disabled={isUploading}
+						disabled={isUploading || indexing.busy}
 						onChange={async (event) => {
-							const file = event.target.files?.[0];
+							const input = event.currentTarget;
+							const file = input.files?.[0];
 							if (!file) return;
 							const mimeType = uploadMimeType(file);
 							if (!mimeType) {
 								setFileError('Разрешены только TXT, Markdown, PDF и CSV');
-								event.target.value = '';
+								input.value = '';
 								return;
 							}
 							setFileError('');
@@ -182,12 +192,13 @@ export function DocumentPage() {
 								await api(`/documents/${id}/files/${upload.file.id}/complete`, {
 									method: 'POST',
 								});
+								await indexing.index(upload.file.id);
 								await loadFiles();
-								event.target.value = '';
 							} catch (error) {
 								setFileError(error instanceof Error ? error.message : 'Ошибка загрузки');
 								await loadFiles();
 							} finally {
+								input.value = '';
 								setIsUploading(false);
 							}
 						}}
@@ -211,6 +222,17 @@ export function DocumentPage() {
 								</span>
 							</div>
 							<div className="file-actions">
+								{capabilities.canUpdateDocument &&
+									file.status === 'READY' &&
+									!indexing.versions.some((version) => version.sourceFileId === file.id) && (
+										<button
+											type="button"
+											disabled={isUploading || indexing.busy}
+											onClick={() => indexing.index(file.id)}
+										>
+											Индексировать
+										</button>
+									)}
 								{file.status === 'READY' && (
 									<button
 										type="button"
@@ -227,26 +249,79 @@ export function DocumentPage() {
 										Скачать
 									</button>
 								)}
-								{capabilities.canManageFiles && (
-									<button
-										type="button"
-										className="danger"
-										onClick={async () => {
-											setFileError('');
-											try {
-												await api(`/documents/${id}/files/${file.id}`, { method: 'DELETE' });
-												await loadFiles();
-											} catch (error) {
-												setFileError(error instanceof Error ? error.message : 'Ошибка удаления');
-											}
-										}}
-									>
-										Удалить
-									</button>
-								)}
+								{capabilities.canManageFiles &&
+									!indexing.versions.some((version) => version.sourceFileId === file.id) && (
+										<button
+											type="button"
+											className="danger"
+											onClick={async () => {
+												setFileError('');
+												try {
+													await api(`/documents/${id}/files/${file.id}`, { method: 'DELETE' });
+													await loadFiles();
+												} catch (error) {
+													setFileError(error instanceof Error ? error.message : 'Ошибка удаления');
+												}
+											}}
+										>
+											Удалить
+										</button>
+									)}
 							</div>
 						</div>
 					))}
+				</div>
+			</section>
+			<section className="card files-section">
+				<h2>Версии документа для поиска</h2>
+				{indexing.notice && <p role="status">{indexing.notice}</p>}
+				{indexing.actionError && (
+					<p className="error" role="alert">
+						{indexing.actionError}
+					</p>
+				)}
+				{indexing.loadError && (
+					<p className="error" role="alert">
+						{indexing.loadError}{' '}
+						<button type="button" onClick={indexing.refresh}>
+							Обновить версии
+						</button>
+					</p>
+				)}
+				{indexing.versions.length === 0 && !indexing.loadError && (
+					<p className="muted">У документа пока нет версий для поиска.</p>
+				)}
+				<div className="file-list" aria-live="polite">
+					{indexing.versions.map((version) => {
+						const failed = version.stages.find((run) => run.status === 'FAILED');
+						return (
+							<div className="file-row" key={version.id}>
+								<div>
+									<strong>
+										Версия {version.version} · {version.status}
+									</strong>
+									<span>
+										{files.find((file) => file.id === version.sourceFileId)?.originalName}
+									</span>
+									{version.isCurrent && <span>Текущая версия в поиске</span>}
+									{failed && (
+										<span>
+											Ошибка этапа {failed.stage} · {failed.errorCode}
+										</span>
+									)}
+								</div>
+								{capabilities.canUpdateDocument && version.status === 'FAILED' && (
+									<button
+										type="button"
+										disabled={isUploading || indexing.busy}
+										onClick={() => indexing.retry(version.id)}
+									>
+										Повторить обработку
+									</button>
+								)}
+							</div>
+						);
+					})}
 				</div>
 			</section>
 		</Layout>

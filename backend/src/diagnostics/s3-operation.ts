@@ -18,6 +18,7 @@ type S3Operation =
 	| 'DeleteObject'
 	| 'ListObjectsV2'
 	| 'HeadObject'
+	| 'GetObject'
 	| 'AbortMultipartUpload'
 	| 'CompleteMultipartUpload'
 	| 'UploadPart'

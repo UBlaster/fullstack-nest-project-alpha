@@ -2,14 +2,19 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, downloadPresignedUrl } from '../../../shared/api';
 import { Layout } from '../../../widgets/layout';
+import { WorkspaceDocumentSearch, type DocumentSummary } from './WorkspaceDocumentSearch';
+
+interface Project {
+	id: string;
+	workspaceId: string;
+	name: string;
+	description: string;
+	documents: DocumentSummary[];
+}
 
 export function ProjectPage() {
 	const { id } = useParams();
-	const [project, setProject] = useState<any>();
-	const [documents, setDocuments] = useState<any[]>([]);
-	const [searchQuery, setSearchQuery] = useState('');
-	const [searchError, setSearchError] = useState('');
-	const [isSearching, setIsSearching] = useState(false);
+	const [project, setProject] = useState<Project>();
 	const [title, setTitle] = useState('');
 	const [content, setContent] = useState('');
 	const [error, setError] = useState<string | null>(null);
@@ -31,10 +36,7 @@ export function ProjectPage() {
 	const load = useCallback(
 		() =>
 			api('/projects/' + id)
-				.then((data) => {
-					setProject(data);
-					setDocuments(data.documents);
-				})
+				.then(setProject)
 				.catch((error) => setError(error.message)),
 		[id],
 	);
@@ -42,40 +44,6 @@ export function ProjectPage() {
 	useEffect(() => {
 		load();
 	}, [load]);
-
-	useEffect(() => {
-		const query = searchQuery.trim();
-
-		if (!project || query.length < 2) {
-			return;
-		}
-
-		const controller = new AbortController();
-		const timeout = window.setTimeout(() => {
-			setIsSearching(true);
-			setSearchError('');
-
-			api(`/workspaces/${project.workspaceId}/documents/search?q=${encodeURIComponent(query)}`, {
-				signal: controller.signal,
-			})
-				.then(setDocuments)
-				.catch((error) => {
-					if (!controller.signal.aborted) {
-						setSearchError(error.message);
-					}
-				})
-				.finally(() => {
-					if (!controller.signal.aborted) {
-						setIsSearching(false);
-					}
-				});
-		}, 300);
-
-		return () => {
-			window.clearTimeout(timeout);
-			controller.abort();
-		};
-	}, [project, searchQuery]);
 
 	useEffect(() => {
 		if (!exportJobId || !exportJobStatus || !['QUEUED', 'PROCESSING'].includes(exportJobStatus)) {
@@ -140,7 +108,7 @@ export function ProjectPage() {
 				</Link>
 			</section>
 			<div className="section-heading">
-				<h2>Документы ({documents.length})</h2>
+				<h2>Документы проекта ({project.documents.length})</h2>
 				<button
 					type="button"
 					disabled={isExporting || isExportPreparing}
@@ -214,37 +182,11 @@ export function ProjectPage() {
 					)}
 				</div>
 			)}
-			<input
-				type="search"
-				placeholder="Поиск документов по заголовку"
-				aria-label="Поиск документов по заголовку"
-				value={searchQuery}
-				onChange={(event) => {
-					const value = event.target.value;
-					const query = value.trim();
-
-					setSearchQuery(value);
-
-					if (query.length < 2) {
-						setDocuments(project.documents);
-						setSearchError(query.length === 1 ? 'Введите минимум два символа' : '');
-						setIsSearching(false);
-					}
-				}}
+			<WorkspaceDocumentSearch
+				key={project.id}
+				workspaceId={project.workspaceId}
+				documents={project.documents}
 			/>
-			{isSearching && <p>Поиск...</p>}
-			{searchError && <p className="error">{searchError}</p>}
-			{!isSearching && !searchError && searchQuery.trim().length >= 2 && documents.length === 0 && (
-				<p>Документы не найдены</p>
-			)}
-			{documents.map((doc: any) => (
-				<Link className="doc" to={`/documents/${doc.id}`} key={doc.id}>
-					<b>{doc.title}</b>
-					<span>
-						{doc.status} · {doc.author.name}
-					</span>
-				</Link>
-			))}
 			<section className="card">
 				<h2>Новый документ</h2>
 				<input
@@ -264,7 +206,6 @@ export function ProjectPage() {
 							body: JSON.stringify({
 								title,
 								content,
-								status: 'DRAFT',
 							}),
 						});
 						setTitle('');

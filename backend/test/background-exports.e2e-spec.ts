@@ -93,6 +93,11 @@ class FakeQueueService {
 }
 
 class FakeStorage implements ObjectStorageService {
+	async readStream(objectKey: string) {
+		const object = this.objects.get(objectKey);
+		if (!object) throw new Error('NotFound');
+		return Readable.from([object]);
+	}
 	readonly objects = new Map<string, Buffer>();
 	readonly uploadKeys: string[] = [];
 	readonly removedKeys: string[] = [];

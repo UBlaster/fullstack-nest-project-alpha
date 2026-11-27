@@ -1,0 +1,16 @@
+# Keep v1 available for reads and rollback while writing the next provider's vectors.
+x-voyage: &voyage
+  EMBEDDING_PROVIDER: fake
+  EMBEDDING_VERSION: v1
+  EMBEDDING_NEXT_PROVIDER: voyage
+  EMBEDDING_NEXT_VERSION: voyage-4-v1
+  VOYAGE_NEXT_EMBEDDING_MODEL: voyage-4
+  EMBEDDING_DIMENSION: "1024"
+  EMBEDDING_REQUESTS_PER_MINUTE: "${EMBEDDING_REQUESTS_PER_MINUTE:-3}"
+  EMBEDDING_CONCURRENCY: "${EMBEDDING_CONCURRENCY:-1}"
+  VOYAGE_API_KEY: "${VOYAGE_API_KEY:?Set VOYAGE_API_KEY in the shell or the Compose .env}"
+services:
+  backend:
+    environment: *voyage
+  worker:
+    environment: *voyage

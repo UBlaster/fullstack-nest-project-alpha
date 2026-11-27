@@ -1,30 +1,18 @@
-# Старт Task 10 на готовой Task 9
+# Task 10. Версии документов и гибридный поиск
 
-## Checkout и база
+## База
 
-- Ветка `feature/task-10-start`. Проверенная база после Task 9 — `0870040fe82de90e948ae52c14cea167cecd86a0`.
-- Материалы в Obsidian: tasks/10-versioned-document-pipeline-and-hybrid-ai-search.md
-  и guides/10-document-pipelines-embeddings-and-hybrid-search-primer.md.
+- Рабочая ветка решения — `codex/linden-47`. Родитель — актуальный коммит `feature/task-10-start`; исходная проверенная основа старта — `a70a1b0` с готовой Task 9 `0870040`.
+- Учебные материалы находятся в Obsidian, Task 10 и Guide 10. Состояние реализации и ссылки для проверки — в `docs/ai/10-document-pipeline-and-hybrid-search.md` в Obsidian.
 
-## Контракты базы
+## Реализация
 
-- Nest feature modules, Prisma/PostgreSQL 16; обязательный Document.body, DTO content.
-  Права и workspace isolation проверяются через access policy.
-- READY-файлы документов в Yandex Object Storage. Redis обслуживает cache-aside.
-  RabbitMQ/amqplib и transactional outbox обслуживают экспорты с confirms и manual ACK.
-- Task 9: очищенные JSON-логи Pino и контекст OpenTelemetry проходят через Collector
-  в Loki/Jaeger; Grafana читает оба источника, Prometheus собирает метрики Collector.
-  API и worker передают W3C контекст через RabbitMQ. `obs:up` использует группу
-  `nest-fullstack-project` с тестовой БД `task9_observability_test`.
+- Загрузка READY-файла создаёт версию по хэшу файла. Outbox и отдельная очередь в RabbitMQ проходят EXTRACT → NORMALIZE → CHUNK → EMBED → INDEX → ACTIVATE. Право на запись проверяется в API и на стадии worker.
+- PostgreSQL хранит фрагменты и pgvector. Поиск объединяет trigram по заголовку и поиск по смыслу через RRF, ограничивает обе выборки текущими версиями доступного workspace до LIMIT.
+- Для проверки по умолчанию используется deterministic fake. Voyage подключается явно. Версии модели, покрытие, dual-write и откат хранятся в PostgreSQL.
+- Сервисы работают в `nest-fullstack-project`. Обычный запуск — `npm run dev` или Docker Compose. Запись тестовых данных выполняется на выделенной БД.
 
-## Задача и проверки
+## Проверки
 
-- Предстоит добавить versioned document pipeline и гибридный поиск по активным версиям.
-  Сохранять текущую версию при сбое, проверять права и фильтровать кандидатов до LIMIT.
-- Базовый Jest запускается обычной командой `npm run test:e2e --prefix backend`
-  на выделенной тестовой БД. `npm run test:task9` проверяет готовую Task 9 на стенде.
-- `npm run test:task10 -- --fixtures` показывает входы для приёмки. После реализации
-  `npm run test:task10` запускает отдельный HTTP-контракт с `TASK10_CONTRACT_TESTS=true`,
-  тестовыми авторизациями и подготовленными READY-файлами в двух workspace.
-  Сценарий отказа новой версии включается указанием `TASK10_REJECTED_FILE_ID`.
-  Имена переменных и требования к фикстурам указаны в тесте.
+- `npm run test:task10 -- --fixtures` показывает входы. Дальнейший `npm run test:task10` проверяет публичный HTTP-контракт с `TASK10_CONTRACT_TESTS=true`, синтетическими учётными записями и подготовленными READY-файлами.
+- Расширенная приёмка, реальные проверки Voyage/Yandex и сопоставление Jaeger, Grafana и Prometheus описаны в материале Task 10 в Obsidian.

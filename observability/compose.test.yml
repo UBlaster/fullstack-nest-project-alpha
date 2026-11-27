@@ -4,6 +4,12 @@ x-test-app: &test-app
   REDIS_URL: redis://redis:6379/9
   EXPORT_QUEUE_NAME: task9-observability-exports
   EXPORT_DLQ_NAME: task9-observability-exports-dead
+  PIPELINE_QUEUE_NAME: task9-observability-stages
+  EMBEDDING_PROVIDER: fake
+  EMBEDDING_VERSION: v1
+  EMBEDDING_NEXT_VERSION: ""
+  EMBEDDING_DIMENSION: "1024"
+  VOYAGE_API_KEY: ""
   S3_ENDPOINT: https://storage.yandexcloud.net
   S3_REGION: ru-central1
   S3_BUCKET: "${TASK9_S3_BUCKET:-task9-not-configured}"

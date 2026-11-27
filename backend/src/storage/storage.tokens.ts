@@ -18,6 +18,7 @@ export interface ObjectHead {
 }
 
 export interface ObjectStorageService {
+	readStream(objectKey: string, signal?: AbortSignal): Promise<Readable>;
 	createUploadUrl(input: {
 		objectKey: string;
 		mimeType: string;

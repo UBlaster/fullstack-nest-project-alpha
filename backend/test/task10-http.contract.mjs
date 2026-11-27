@@ -11,7 +11,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 // TASK10_VIEWER_TOKEN, TASK10_FOREIGN_TOKEN, TASK10_HOME_DOC, TASK10_DISTRACTOR_DOC, TASK10_FOREIGN_DOC.
 // Optionally set TASK10_REJECTED_FILE_ID to a different READY file of the home document that
 // this extractor permanently rejects. Its synthetic contents must differ from the home text.
-// Existing READY files remain in place. Only the three designated document versions are requested.
+// Optionally set TASK10_REPLACEMENT_FILE_ID to a READY text/plain file of the home document
+// prepared with the replacement filename/text printed by --fixtures. Use a fresh home fixture
+// to demonstrate a transition: ingested content is deduplicated on subsequent runs.
 const fileName = 'task10-contract.txt';
 const fixtures = {
 	home: {
@@ -26,6 +28,11 @@ const fixtures = {
 		title: 'Saftey handbook',
 		text: 'Backup recovery. Edition Foreign. ' + 'Backup recovery. '.repeat(35),
 	},
+};
+
+const replacement = {
+	fileName: 'task10-contract-replacement.txt',
+	text: 'RevisedEdition backup recovery. '.repeat(36),
 };
 
 function required(name) {
@@ -52,7 +59,13 @@ function client() {
 			!origin.password,
 		'TASK10_API_ORIGIN must be a loopback origin without credentials or a path',
 	);
-	return async (label, path, token, statuses, { method = 'GET', body } = {}) => {
+	return async (
+		label,
+		path,
+		token,
+		statuses,
+		{ method = 'GET', body, timeoutMs = 15_000 } = {},
+	) => {
 		const response = await fetch(new URL(path, origin), {
 			method,
 			headers: {
@@ -61,7 +74,7 @@ function client() {
 			},
 			body: body && JSON.stringify(body),
 			redirect: 'error',
-			signal: AbortSignal.timeout(15_000),
+			signal: AbortSignal.timeout(timeoutMs),
 		});
 		assert.ok(
 			statuses.includes(response.status),
@@ -147,10 +160,12 @@ function items(value) {
 	return Array.isArray(value) ? value : value?.items;
 }
 
-async function checkSearch(api, item, token, query, channel, key) {
+async function checkSearch(api, item, token, query, channel, key, sourceText = fixtures[key].text) {
 	const params = new URLSearchParams({ q: query, limit: '1' });
 	const result = items(
-		await api('hybrid search', item.workspacePath + '/search?' + params, token, [200]),
+		await api('hybrid search', item.workspacePath + '/search?' + params, token, [200], {
+			timeoutMs: 35_000,
+		}),
 	);
 	assert.ok(Array.isArray(result) && result.length === 1, 'Expected one accessible search hit');
 	const hit = result[0];
@@ -179,10 +194,7 @@ async function checkSearch(api, item, token, query, channel, key) {
 		'Expected a nonempty search snippet',
 	);
 	const publicText = JSON.stringify(hit).replace(/\s+/g, ' ');
-	assert.ok(
-		!publicText.includes(fixtures[key].text.trim()),
-		'Search exposed the complete source text',
-	);
+	assert.ok(!publicText.includes(sourceText.trim()), 'Search exposed the complete source text');
 	for (const field of ['content', 'body', 'chunks', 'text', 'chunkText', 'embedding', 'vector']) {
 		assert.ok(!Object.hasOwn(hit, field), 'Search hit exposes ' + field);
 	}
@@ -190,7 +202,7 @@ async function checkSearch(api, item, token, query, channel, key) {
 }
 
 if (process.argv.includes('--fixtures')) {
-	process.stdout.write(JSON.stringify({ fileName, fixtures }, null, 2) + '\n');
+	process.stdout.write(JSON.stringify({ fileName, fixtures, replacement }, null, 2) + '\n');
 } else {
 	test(
 		'Task 10 public versioning, permissions and hybrid search',
@@ -242,6 +254,22 @@ if (process.argv.includes('--fixtures')) {
 			}
 
 			const rejectedId = process.env.TASK10_REJECTED_FILE_ID;
+			const replacementId = process.env.TASK10_REPLACEMENT_FILE_ID;
+			if (replacementId !== undefined) {
+				const ready = await api('verify replacement fixture', home.path + '/files', owner, [200]);
+				assert.ok(
+					replacementId !== home.fileId &&
+						replacementId !== rejectedId &&
+						ready.some(
+							(file) =>
+								file.id === replacementId &&
+								file.documentId === home.doc.id &&
+								file.status === 'READY' &&
+								file.mimeType === 'text/plain',
+						),
+					'Provide a distinct READY text/plain file of the home document for the successful replacement',
+				);
+			}
 			if (rejectedId !== undefined) {
 				const ready = await api('verify rejected fixture', home.path + '/files', owner, [200]);
 				assert.ok(
@@ -346,6 +374,69 @@ if (process.argv.includes('--fixtures')) {
 							/\b(snapshot|restore)\b/i.test(retained.snippet),
 						'Search lost the previous version passage',
 					);
+				},
+			);
+
+			await t.test(
+				'successful replacement activates a new indexed version and changes the public search snippet',
+				{
+					skip:
+						replacementId === undefined &&
+						'Supply TASK10_REPLACEMENT_FILE_ID for the replacement case',
+				},
+				async (t) => {
+					const revised = /\bRevisedEdition\b/i;
+					assert.ok(
+						!revised.test(initial.snippet),
+						'Use a fresh home fixture to prove the transition',
+					);
+					const id = await createVersion(api, { ...home, fileId: replacementId });
+					assert.notEqual(id, homeId, 'Distinct source contents must create a new version');
+					await waitForTerminal(api, viewer, id, 'INDEXED');
+
+					// INDEX can complete before ACTIVATE; observe the read side on the same query.
+					const deadline = Date.now() + 120_000;
+					do {
+						const hit = await checkSearch(
+							api,
+							home,
+							viewer,
+							'backup recovery',
+							'semantic',
+							'home',
+							replacement.text,
+						);
+						if (revised.test(hit.snippet) && hit.snippet !== initial.snippet) {
+							const [previous, current] = await Promise.all(
+								[homeId, id].map((versionId) =>
+									api('verify activation', '/document-versions/' + versionId, viewer, [200]),
+								),
+							);
+							assert.ok(
+								previous.id === homeId && previous.status === 'INDEXED',
+								'Previous index was lost',
+							);
+							assert.ok(
+								current.id === id && current.status === 'INDEXED',
+								'Replacement index was lost',
+							);
+							if ('isCurrent' in previous)
+								assert.equal(previous.isCurrent, false, 'Previous version stayed current');
+							if ('isCurrent' in current)
+								assert.equal(current.isCurrent, true, 'Replacement is not current');
+							assert.deepEqual(
+								(await readVersionIds()).filter((value) => value === homeId || value === id),
+								[homeId, id].sort(),
+								'The version list must preserve both identities',
+							);
+							t.diagnostic(
+								'Viewer observed the indexed replacement ' + id + ' for previous version ' + homeId,
+							);
+							return;
+						}
+						await delay(300);
+					} while (Date.now() < deadline);
+					assert.fail('Indexed replacement did not become visible in the public search snippet');
 				},
 			);
 		},
